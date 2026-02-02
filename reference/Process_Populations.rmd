@@ -1,0 +1,251 @@
+---
+title: "Process Populations - 1000G, HGDP, SGDP"
+author: "Hansi"
+date: "2025-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+```
+
+## Populations
+
+Process 1000G (n=2,504), HGDP (n=828) and SGDP (n=279) - Total n=3611
+
+```{r, warning=TRUE, echo=FALSE}
+allDeep_1000G <- read.delim("data/allDeep_1000G.hsd")
+allDeep_1000G$Dataset<-"1000G"
+
+allDeep_1000G_dist <- allDeep_1000G %>%
+  distinct(Input_Sample, .keep_all = TRUE)
+
+all1000G_3k <- read.delim("data/1000G-3202_extend.hsd")
+all1000G_3k$Dataset<-"1000G 3202"
+
+all1000G_3k_dist <- all1000G_3k %>%
+  distinct(Input_Sample, .keep_all = TRUE)
+
+  
+allDeep_HGDP <- read.delim("data/allDeep_HGDP.hsd")
+allDeep_HGDP$Dataset <- "HGDP"
+
+allDeep_SGDP <- read.delim("data/allDeep_SGDP.hsd")
+allDeep_SGDP$Dataset <- "SGDP"
+
+
+
+allDeep<-rbind(all1000G_3k, allDeep_HGDP, allDeep_SGDP) 
+allDeepUnique <- allDeep %>% distinct(Input_Sample, .keep_all=TRUE)
+
+
+combined_df <- bind_rows(
+  allDeep_SGDP,
+  allDeep_HGDP,
+  all1000G_3k
+)
+
+allDeep_dist <- combined_df %>%
+  distinct(Input_Sample, .keep_all = TRUE)
+
+ggplot(allDeep, aes(x=Dataset)) + geom_bar() + stat_count(geom = "text", colour = "white", size = 3.5, aes(label = after_stat(count)),position=position_stack(vjust=0.5)) +ggtitle("All datasets")
+
+ggplot(allDeepUnique, aes(x=Dataset)) + geom_bar() + stat_count(geom = "text", colour = "white", size = 3.5, aes(label = after_stat(count)),position=position_stack(vjust=0.5)) + ggtitle("All datasets with distinct haplotypes")
+
+ggplot(allDeep_dist, aes(x=Dataset)) + geom_bar() + stat_count(geom = "text", colour = "white", size = 3.5, aes(label = after_stat(count)),position=position_stack(vjust=0.5)) + ggtitle("All datasets with distinct haplotypes, favoring 1000G over HGDP and SGDP")
+
+```
+Annotate IGSR Samples
+
+```{r, echo=FALSE}
+
+igsr_samples <- read_excel("data/igsr_samples.xlsx")
+
+igsr_wide <- igsr_samples %>%
+mutate(temp_id = row_number()) %>% 
+
+  # 2. Split and Unnest: Use separate_rows for a clean, long format
+  separate_rows(`Data collections`, sep = ",\\s*") %>%
+  
+  # 3. Clean and Prepare Columns
+  mutate(
+    # Clean up the dataset names
+    dataset_name = str_trim(`Data collections`),
+    
+    # Create the value column (force to be numeric)
+    is_present = 1
+  ) %>%
+  
+  # 4. Diagnostic Check and Summarization (Highly Recommended)
+  # This step ensures that if a row ID has the same dataset name multiple times
+  # (which shouldn't happen after cleaning, but is a safe guard), it is aggregated.
+  group_by(temp_id, dataset_name) %>%
+  summarise(is_present = max(is_present, na.rm = TRUE), .groups = 'drop') %>%
+  
+  # 5. Pivot Wider
+  pivot_wider(
+    id_cols = temp_id,            # Identify rows by the unique ID
+    names_from = dataset_name,    # Column names are the dataset names
+    values_from = is_present,     # Values are the numeric '1'
+    values_fill = 0               # Now fill with the numeric '0'
+  ) %>%
+  
+  # 6. Clean up: Join back to original data and remove temp ID
+  select(-temp_id) # Remove the temporary ID column if it's the last step
+
+  
+ggplot(igsr_samples, aes(y=substring(`Data collections`, 1,50))) + geom_bar() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+allDeepUAnnot_KG_HGDP<-merge(allDeepUnique, igsr_samples, by.x="SampleID", by.y="Sample name")
+
+
+sample_SGDP <- read_excel("data/Sample_Info_SGDP.xlsx")
+allDeep_SGDP_meta<-merge(allDeep_SGDP, sample_SGDP, by.x="SampleID", by.y="BiosampleID", all.x = TRUE)
+
+sample_SGDP2 <- read_excel("data/Sample_Info_SGDP.xlsx", sheet = "Tabelle2")
+
+allDeepUAnnot_SGDP1<-merge(allDeepUnique,sample_SGDP2 , by.x="SampleID", by.y="2-ena_id")
+unique(allDeepUAnnot_SGDP1$`10-Region`)
+
+allDeepUAnnot_SGDP2<-merge(allDeepUnique,igsr_samples , by.x="SampleID", by.y="Biosample ID")
+
+
+
+combined_df <- bind_rows(
+  allDeepUAnnot_KG_HGDP %>%
+    select(SampleID,Range, Haplogroup, Input_Sample, Dataset, 'Population code', Superpop_code_self),
+  allDeepUAnnot_SGDP2 %>%
+    select(SampleID,Range, Haplogroup, Input_Sample, Dataset, 'Population code', Superpop_code_self))
+
+
+#only keep the first super population - reomve the comment in brackets and assign EUR to the admixed HG01783 with Haplogroup H4a1a 
+
+combined_df$SuperPopulation<-substring(combined_df$Superpop_code_self, 1,3) 
+
+ggplot(combined_df, aes(x=SuperPopulation, fill=SuperPopulation)) + geom_bar()
+
+
+
+combinded_counts<-combined_df %>% group_by(SuperPopulation) %>% 
+  summarise(kpg3_hgdp_sgdp = n())
+combinded_counts$kpg3<-c(661, 347,504,503, 0, 489)
+
+#remove other Populations (Oth with n=32, mostly oceania)
+combined_clean<-combinded_counts %>% filter(SuperPopulation!="Oth")
+
+ggplot(combined_clean) +
+  # Create the connecting line
+  geom_segment(aes(x = kpg3, xend = kpg3_hgdp_sgdp, y = SuperPopulation, yend = SuperPopulation), color = "#b2b2b2", linewidth = 1.5) +
+  # Add the 'before' dots
+  geom_point(aes(x = kpg3, y = SuperPopulation), color = "#4e79a7", size = 4) +
+  # Add the 'after' dots
+  geom_point(aes(x = kpg3_hgdp_sgdp, y = SuperPopulation), color = "#e15759", size = 4) +
+  theme_minimal() +
+  labs(title = "Increase in Samples per Super population", x = "Number of Samples in Region", y = "Super Population") + xlim(0,1000)
+
+
+paste("Numbers of samples in 1000G Phase 3: ", sum(combinded_counts$kpg3))
+paste("Numbers of samples in 1000G, HGDP, SGDP: ", sum(combinded_counts$kpg3_hgdp_sgdp))
+paste("Numbers of samples in 1000G, HGDP, SGDP with Population Code: ",sum(combined_clean$kpg3_hgdp_sgdp))
+
+
+
+
+
+
+```
+## Haplogroup compositions
+
+```{r, echo=FALSE, out.width="100%"}
+
+combined_df$Hgsubgroup<-str_extract(combined_df$Haplogroup, "[A-z]{1,4}+\\d*")
+combined_df$oneletter<-str_extract(combined_df$Haplogroup, "[A-z]*")
+
+get_Supergroups <- function(df){
+     dplyr::mutate(
+       df,
+       MacroPhylo = case_when(
+                              str_starts("L0", Hgsubgroup)~"L0",
+                              str_starts("L1", Hgsubgroup)~"L1",
+                              str_starts("L2", Hgsubgroup)~"L2",
+                              str_starts("L3", Hgsubgroup)~"L3*",
+                              str_starts("L4", Hgsubgroup)~"L4",
+                              str_starts("L5", Hgsubgroup)~"L5",
+                              str_starts("L6", Hgsubgroup)~"L6",
+                              str_starts("M7", Hgsubgroup)~"M7",
+                              str_starts("M8", Hgsubgroup)~"M8",
+                              str_detect("CZ", oneletter)~"M8",
+                              str_starts("M9", Hgsubgroup)~"M9",                  
+                              str_detect("E", oneletter)~"M9",
+                              str_detect("G", oneletter)~"G",
+                              str_detect("D", oneletter)~"D",
+                              str_starts("N1", Hgsubgroup)~"N1",                  
+                              str_starts("I", oneletter)~"N1",                  
+                              str_starts("N2", Hgsubgroup)~"N2",
+                              str_starts("W", oneletter)~"N2",  
+                              str_starts("N9", Hgsubgroup)~"N9",
+                              str_starts("Y", oneletter)~"N9",
+                              str_detect("NOS", oneletter)~"N*",
+                              str_detect("A", oneletter)~"A",
+                              str_detect("X", oneletter)~"X",
+                              str_starts("R0", Hgsubgroup)~"R0",
+                              str_detect("HV", oneletter )~"R0",
+                              str_detect("JT", oneletter)~"JT",
+                              str_starts("R9", Hgsubgroup)~"R9",
+                              str_detect("F", oneletter)~"R9",
+                              str_starts("B", oneletter)~"B",
+                              str_detect("RP", oneletter)~"R*",
+                              str_detect("UK", oneletter)~"UK",
+                              str_detect("MQ", oneletter)~"M*"))
+}
+
+
+
+combined_df<-get_Supergroups(combined_df)
+
+
+levels_order <- c(
+  "L0", "L1", "L2", "L3*", "L4", "L5", "L",    # AFR
+  "M*", "M7", "M8", "M9", "G", "D", "A",        # ASIA
+  "N*", "N9", "N1", "N2", "X",                 # EURASIA
+  "R0", "JT", "U", "R*", "R9", "B"             # EUR
+)
+
+rhg_cols_accessible <- c(
+  # Group 1: VERMILLION (Red-Orange) - Distinct from Green for colorblind users
+  "#781c10", "#942517", "#b12e1e", "#cd3726", "#e04e39", "#ed6b58", "#f48c7a",
+  
+  # Group 2: AMBER/GOLD - Provides a high-contrast bridge
+  "#997000", "#b38300", "#cc9600", "#e6a800", "#ffbb00", "#ffc833", "#ffd666",
+  
+  # Group 3: TEAL/CYAN (The "Green" replacement that is Blue-safe)
+  "#004d40", "#00695c", "#00897b", "#00a191", "#26a69a",
+  
+  # Group 4: INDIGO/BLUE 
+  "#1a237e", "#283593", "#303f9f", "#3949ab", "#5c6bc0", "#7986cb"
+)
+
+my_palette <- setNames(rhg_cols_accessible, levels_order)
+
+
+ggplot(combined_df, aes(x=MacroPhylo, fill=MacroPhylo)) + geom_bar() + facet_wrap(~SuperPopulation, ncol=2) + scale_fill_manual(values = my_palette) +   theme(legend.position="none") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Split the data into a list
+list_of_superpopulations <- split(combined_df, combined_df$SuperPopulation)
+
+# Loop through the list and save
+for (group_name in names(list_of_superpopulations)) {
+  write.csv(list_of_superpopulations[[group_name]], 
+            file = paste0("output/ref_", group_name, ".csv"), 
+            row.names = FALSE)
+write.csv(x = combined_df, file="input_ALL.csv", row.names = FALSE)
+}
+
+
+```

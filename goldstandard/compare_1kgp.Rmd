@@ -1,0 +1,76 @@
+---
+title: "Compare 1000G"
+author: "Hansi"
+date: "2025-10-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+```
+
+## Load results from Haplogrep3
+
+
+```{r, echo=FALSE}
+
+#data byrska-bishop 1000G TRIOs 
+kg_deep <- read.delim("data/haplogroups.extended_1kgp3_3202.csv")
+
+#freebayes called -> fasta contigs
+kg_freebayes<-read.delim("data/haplogroups.extended_1kgp3_freebayes.csv") 
+
+#1000G phase 3 low coverage data - official VCF
+kg_callmom<-read.delim("data/haplogroups.extended_1kgp3_callmom.csv") 
+
+#freebayes called -> samtools consensus
+kg_pan<-read.delim("data/haplogroups.extended_1kgp3_pan.csv")
+
+#
+kg_samtools<-read.delim("data/haplogroups.extended_1kgp3_mutserve.csv")
+
+
+# 1. Join the first two
+merged_kg_deep <- inner_join(kg_deep, kg_freebayes, by = "SampleID", suffix = c(".deep", ".freebayes"))
+
+
+merged_kg_low <- inner_join(kg_callmom, kg_freebayes, by = "SampleID", suffix = c(".low", ".freebayes"))
+
+merged_kg_low2 <- inner_join(kg_callmom, kg_samtools, by = "SampleID", suffix = c(".low", ".samtools"))
+
+merged_kg_pan <- inner_join(kg_pan, kg_freebayes, by = "SampleID", suffix = c(".pan", ".freebayes"))
+
+merged_kg_pan_low <- inner_join(kg_pan, kg_callmom, by = "SampleID", suffix = c(".pan", ".low"))
+
+merged_kg_freebayes <- inner_join(kg_samtools, kg_freebayes, by = "SampleID", suffix = c(".samtools", ".freebayes"))
+
+ggplot(merged_kg_deep, aes(x=Quality.deep, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.deep==Haplogroup.freebayes), alpha=0.5) +   theme(legend.position="bottom") + ggtitle("1000G Deep Byrska-Bishop et al vs. Freebayes")
+
+ggplot(merged_kg_low,  aes(x=Quality.low, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.low==Haplogroup.freebayes), alpha=0.5) +theme(legend.position="bottom") + ggtitle("1000G Phase 3 Low-coverage vs. Freebayes")
+
+ggplot(merged_kg_low2,  aes(x=Quality.low, y=Quality.samtools)) + geom_point(aes(color=Haplogroup.low==Haplogroup.samtools)) +theme(legend.position="bottom") + ggtitle("1000G Phase 3 Low-coverage vs. Samtools consensus")
+
+ggplot(merged_kg_pan, aes(x=Quality.pan, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.pan==Haplogroup.freebayes), alpha=0.5) +theme(legend.position="bottom") + ggtitle("1000G Freebayes adapted ref vs. Freebayes consensus")
+
+ggplot(merged_kg_pan_low, aes(x=Quality.pan, y=Quality.low)) + geom_point(aes(color=Haplogroup.pan==Haplogroup.low), alpha=0.5) +theme(legend.position="bottom") + ggtitle("1000G Freebayes adapted ref vs. 1000G Phase 3 low coverage")
+
+ggplot(merged_kg_freebayes, aes(x=Quality.samtools, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.samtools==Haplogroup.freebayes), alpha=0.5) +theme(legend.position="bottom") + ggtitle("1000G Samtools consensus vs. Freebayes consensus")
+
+
+mismatches_deep <- merged_kg_deep %>%
+  filter(Haplogroup.deep != Haplogroup.freebayes)
+
+mismatches_low2 <- merged_kg_low2 %>%
+  filter(Haplogroup.low != Haplogroup.samtools)  %>%
+  select(SampleID, Haplogroup.low, Haplogroup.samtools)
+
+
+mismatches_freebayes <- merged_kg_freebayes %>%
+  filter(Haplogroup.samtools != Haplogroup.freebayes) %>%
+  select(SampleID, Haplogroup.samtools, Haplogroup.freebayes)
+
+```
+
