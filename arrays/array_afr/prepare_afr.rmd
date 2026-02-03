@@ -16,7 +16,11 @@ library(stringr)
 
 ## Run Haplogrep on African Samples
 
+This R-Markdown script runs over all genotyping arrays based on the publication from Lankheet et al 2021 <https://pubmed.ncbi.nlm.nih.gov/34674637/>. Thereby we calculate the haplogroups based on the present genotypes per microarray and calculate the distance to the resulting haplogroups from the sequencing data (n=193). The result is a ranked list, based on the area under the curve (AUC) for the empirical cumulative distribution function (ECDF).\
 
+**Interpretability**: An array that has a distance of 0 for every sample would have an ECDF value of 1.0 at every point from 0 to 25, resulting in a maximum AUC of 26. The ECDF value at any distance $x$ is $P(Distance \le x)$. By averaging these probabilities across the whole range, we are calculating the expected probability that a sample falls within the "acceptable" range at any given cutoff. We use a normalized AUC (corrected by the number of points).
+
+A score of 0.95 indicates that the array is performing at 95% of its theoretical maximum efficiency regarding haplogroup calling accuracy.
 
 ```{r, echo=FALSE, message=FALSE, fig.width=12, fig.height=10}
 
@@ -120,12 +124,12 @@ ggplot(exp_vs_found, aes(x = hg2_MacroPhylo, fill = ArrayType)) +
     fill = "Data Type"
   ) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "none")
 
 
 ggplot(all_distances_df, aes(x = distance, color = ArrayType)) +
   geom_density(adjust = 1, bw = 0.5) +
-  scale_x_continuous(breaks = 0:15) +
+  scale_x_continuous(breaks = 0:25) +
   labs(title = "Density Estimation of Values",
        x = "Value",
        y = "Density") +
@@ -277,7 +281,7 @@ print(plot_proportions) # Display the plot
 
 ```{r, echo=FALSE}
 library(kableExtra)
-max_dist <- 26 
+max_dist <- 25 
 dist_range <- 0:max_dist
 num_points <- length(dist_range)
 
@@ -337,5 +341,5 @@ worst_score <- round(auc_results$AUC_Normalized[nrow(auc_results)], 3)
 ```
 
 ### 🥇 Top Performer: `r best_array_name` (Score: `r best_score`)
-### ⚠️ Worst Performer: `r worst_array_name` (Score: `r worst_score`)
 
+### ⚠️ Worst Performer: `r worst_array_name` (Score: `r worst_score`)
