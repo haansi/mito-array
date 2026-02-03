@@ -1,0 +1,341 @@
+---
+title: "Prepare_microarray_afr"
+author: "Hansi"
+date: "2025-07-31"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(purrr)
+library(stringr)
+```
+
+## Run Haplogrep on African Samples
+
+
+
+```{r, echo=FALSE, message=FALSE, fig.width=12, fig.height=10}
+
+
+source("../../scripts/haplogroup_processing.R")
+
+phylotreeVersion<-"17_FU1"
+
+
+haplogrep_input_file <- "data/sequence193AFR_genbank.hsd"
+#haplogrep_input_file <- "../phylotree17FU1_mod.hsd"
+
+
+array_map <- c(
+  "SNP array 1" = "Affymetrix Genome‑Wide Human SNP Array 6.0",
+  "SNP array 2" = "Axiom Genome‑Wide Human Origins 1 Array",
+  "SNP array 3" = "Axiom Genome‑Wide PanAFR Genotyping Bundle",
+  "SNP array 4" = "H3Africa Array",
+  "SNP array 5" = "Illumina Infinium Multi‑Ethnic AMR/AFR‑8",
+  "SNP array 6" = "Illumina Infinium Multi‑Ethnic Global‑8",
+  "SNP array 7" = "Illumina Infinium Omni2.5–8",
+  "SNP array 8" = "Illumina Infinium Omni5–4"
+)
+array_map_df_stack <- stack(array_map)
+array_map_df_stack <- array_map_df_stack %>%
+  dplyr::rename(ArrayID = ind, ArrayName = values)
+
+array_input_dir <- "data"
+array_output_dir<-"output"
+
+excel_file <- file.path(array_input_dir, "12863_2021_1000_MOESM2_ESM.xlsx")
+
+df <- read_excel(excel_file, sheet = "Supplementary Table 4")
+df_long <- df %>%
+  pivot_longer(cols = everything(), names_to = "ArrayID", values_to = "POS")
+
+df_mapped <- merge(df_long, array_map_df_stack, by.x="ArrayID", by.y="ArrayID")
+df_mapped <- df_mapped[complete.cases(df_mapped), ]
+
+
+if (!dir.exists(array_output_dir)) {
+  dir.create(array_output_dir, recursive = TRUE)
+}
+
+# Get unique array names
+unique_arrays <- unique(df_mapped$ArrayName)
+
+# --- Processing function ---
+process_one_array <- function(array_name) {
+  output_name <- str_to_lower(str_replace_all(array_name, "[^a-zA-Z0-9]", "_"))
+  array_subset <- df_mapped %>% filter(ArrayName == array_name)
+
+  array_df <- tibble(
+    V1 = "chrM",
+    V2 = array_subset$POS,
+    V3 = array_subset$POS,
+    V4 = "no info"
+  )
+
+  array_file_path <- file.path(array_input_dir, paste0(output_name, ".txt"))
+  write_tsv(array_df, array_file_path, col_names = FALSE)
+
+results <- process_haplogroup_data(
+    array_type = array_name,
+    array_file_path = array_file_path,
+    haplogrep_input_file = haplogrep_input_file,
+    output_base_name = output_name 
+  )
+
+  if (!is.null(results) && !is.null(results$haplogroupsDiff)) {
+    results$haplogroupsDiff %>%
+      mutate(ArrayType = array_name)
+  } else {
+    NULL
+  }
+}
+
+# --- Run for all arrays ---
+all_distances_list <- map(unique_arrays, process_one_array)
+all_distances_df <- compact(all_distances_list) %>% bind_rows()
+
+expected <- all_distances_df %>%
+  filter(ArrayType==all_distances_df$ArrayType[1]) %>%
+  transmute(
+    ArrayType = "Expected",
+    hg2_MacroPhylo = ifelse(is.na(hg1_MacroPhylo), "Unknown", hg1_MacroPhylo)
+  )
+
+found<- all_distances_df %>%
+  select(ArrayType, hg2_MacroPhylo)
+
+exp_vs_found<-rbind(expected, found)
+
+ggplot(exp_vs_found, aes(x = hg2_MacroPhylo, fill = ArrayType)) +
+  geom_bar(position = "dodge") + # "dodge" places bars side-by-side
+  facet_wrap(~ ArrayType, scales = "free_y", ncol = 2) + # Create separate plots for each ArrayType
+  labs(
+    title = "Comparison of Expected vs. Found Macrohaplogroups per Microarray",
+    x = "Macrohaplogroup",
+    y = "Count of Occurrences",
+    fill = "Data Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+
+ggplot(all_distances_df, aes(x = distance, color = ArrayType)) +
+  geom_density(adjust = 1, bw = 0.5) +
+  scale_x_continuous(breaks = 0:15) +
+  labs(title = "Density Estimation of Values",
+       x = "Value",
+       y = "Density") +
+  theme_minimal() 
+
+
+ggplot(all_distances_df, aes(x = distance, color = ArrayType)) +
+  stat_ecdf(geom = "line", lwd=1) + stat_ecdf(geom = "point", size = 1) +
+  scale_x_continuous(breaks = 0:25) +
+  labs(
+    title = "Cumulative Distribution of Values Across Datasets",
+    subtitle = paste("Distances on haplogroups (n=",nrow(all_distances_df)/8, ") of expected vs. predicted Haplogroups"),
+    x = "Observed Haplogroup distance",
+    y = "Cumulative Proportion",
+    color = "MicroArray"
+  ) +
+  theme_minimal(base_size = 12) +  coord_cartesian(xlim = c(1, max(all_distances_df$distance, na.rm = TRUE))) + theme(legend.position = "right")
+
+if (!is.null(all_distances_df) && nrow(all_distances_df) > 0) {
+  ggplot(all_distances_df, aes(x = ArrayType, y = distance, fill = ArrayType)) +
+    geom_violin(trim = FALSE, alpha = 0.7) + # trim=FALSE ensures tails extend to min/max
+    labs(
+      title = "Comparison of Haplogroup Distances by Array Type",
+      subtitle = "Violin Plot with Jittered Data Points",
+      x = "Array Type",
+      y = "Haplogroup Distance"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")  + theme(axis.text.x = element_text(angle = 270, vjust = 0.5, hjust=1))
+} else {
+  cat("No distance data available for comparison.")
+}
+
+
+
+####PLOT MACROPHYLO
+# --- Data Preparation for Plotting ---
+
+# Get all unique macrohaplogroup levels for consistent ordering
+# Combine all unique hg2_MacroPhylo from both found and expected datasets
+# THIS IS WHERE 'all_macro_hgs' IS CREATED. Ensure 'found' and 'expected' exist before this line.
+all_macro_hgs <- sort(unique(c(found$hg2_MacroPhylo, expected$hg2_MacroPhylo)))
+# print(all_macro_hgs) # You can uncomment this to check its content
+
+
+# Convert to factor with consistent levels for proper ordering on x-axis
+found$hg2_MacroPhylo <- factor(found$hg2_MacroPhylo, levels = all_macro_hgs)
+expected$hg2_MacroPhylo <- factor(expected$hg2_MacroPhylo, levels = all_macro_hgs)
+
+
+# 1. Calculate Counts and Proportions for 'Found' data
+found_summary <- found %>%
+  group_by(ArrayType) %>%
+  mutate(TotalFound = n()) %>% # Total for proportion calculation per array
+  group_by(ArrayType, hg2_MacroPhylo, TotalFound) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  mutate(Proportion = Count / TotalFound)
+
+# 2. Calculate Counts and Proportions for 'Expected' data (overall)
+expected_summary_overall <- expected %>%
+  mutate(TotalExpected = n()) %>% # Total for overall proportion
+  group_by(hg2_MacroPhylo, TotalExpected) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  mutate(Proportion = Count / TotalExpected)
+
+# 3. Replicate 'Expected' data for each 'ArrayType' found
+replicated_expected_data <- expand.grid(
+  ArrayType = unique(found_summary$ArrayType),
+  hg2_MacroPhylo = all_macro_hgs # Uses the 'all_macro_hgs' variable
+) %>%
+  left_join(expected_summary_overall, by = "hg2_MacroPhylo") %>%
+  mutate(Count = replace_na(Count, 0), Proportion = replace_na(Proportion, 0))
+
+# Ensure factor levels for replicated data are consistent
+replicated_expected_data$hg2_MacroPhylo <- factor(replicated_expected_data$hg2_MacroPhylo, levels = all_macro_hgs)
+
+
+#### Plotting Option 1: Using Raw Counts with a Reference Line ####
+
+plot_counts <- ggplot() +
+  # Bars for 'Found' data (raw counts)
+  geom_col(data = found_summary, aes(x = hg2_MacroPhylo, y = Count, fill = ArrayType),
+           position = "dodge", show.legend = FALSE) + # Fill by ArrayType, but hide legend as facets show it
+
+  # Line and points for 'Expected' data (raw counts)
+  geom_line(data = replicated_expected_data, aes(x = hg2_MacroPhylo, y = Count, group = 1),
+            color = "red", linetype = "dashed", linewidth = 1) +
+  geom_point(data = replicated_expected_data, aes(x = hg2_MacroPhylo, y = Count, shape = "Expected"), # Use shape for legend
+             color = "red", size = 2) +
+
+  # Faceting by ArrayType
+  facet_wrap(~ ArrayType, scales = "free_y", ncol = 2) + # 'free_y' allows y-axis to vary per array
+
+  labs(
+    title = "Found Macrohaplogroup Counts vs. Overall Expected Distribution",
+    x = "Macrohaplogroup",
+    y = "Count of Occurrences",
+    shape = "Reference" # Legend title for the expected shape
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    strip.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  ) +
+  scale_shape_manual(values = c("Expected" = 19)) # 19 is a solid circle
+
+print(plot_counts) # Display the plot
+
+
+#### Plotting Option 2: Using Proportions with a Reference Line ####
+
+plot_proportions <- ggplot() +
+  # Bars for 'Found' data (proportions)
+  geom_col(data = found_summary, aes(x = hg2_MacroPhylo, y = Proportion, fill = ArrayType),
+           position = "dodge", show.legend = FALSE) +
+
+  # Line and points for 'Expected' data (proportions)
+  geom_line(data = replicated_expected_data, aes(x = hg2_MacroPhylo, y = Proportion, group = 1),
+            color = "red", linetype = "dashed", linewidth = 1) +
+  geom_point(data = replicated_expected_data, aes(x = hg2_MacroPhylo, y = Proportion, shape = "Expected"),
+             color = "red", size = 2) +
+
+  # Faceting
+  facet_wrap(~ ArrayType, ncol = 2) +
+
+  labs(
+    title = "Proportion of Found Macrohaplogroups vs. Overall Expected Distribution",
+    x = "Macrohaplogroup",
+    y = "Proportion of Occurrences",
+    shape = "Reference"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    strip.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  ) +
+  scale_shape_manual(values = c("Expected" = 19)) +
+  scale_y_continuous(labels = scales::percent) # Format y-axis as percentage
+
+print(plot_proportions) # Display the plot
+
+```
+
+## Sankey Plots of best, worst Microarray:
+
+```{r, echo=FALSE}
+library(kableExtra)
+max_dist <- 26 
+dist_range <- 0:max_dist
+num_points <- length(dist_range)
+
+auc_results <- all_distances_df %>%
+  group_by(ArrayType) %>%
+  summarise(
+    AUC_Normalized = sum(ecdf(distance)(dist_range)) / num_points,
+    Mean_Distance = mean(distance, na.rm = TRUE),
+    n = n()
+  ) %>%
+  mutate(Tier = case_when(
+    AUC_Normalized >= 0.90 ~ "🥇 Gold (Excellent)",
+    AUC_Normalized >= 0.80 ~ "🥈 Silver (Good)",
+    AUC_Normalized >= 0.70 ~ "🥉 Bronze (Fair)",
+    TRUE                   ~ "⚠️ Low Performance"
+  )) %>%
+  arrange(desc(AUC_Normalized))
+
+# Update names for the Sankey section
+best_array_name  <- auc_results$ArrayType[1]
+worst_array_name <- auc_results$ArrayType[nrow(auc_results)]
+
+
+kable(auc_results, 
+      col.names = c("Microarray", "Normalized AUC", "Mean Distance", "Sample Size", "Performance Tier"),
+      digits = 3,
+      caption = "Microarray Performance Ranking with Tiers")
+
+ggplot(auc_results, aes(x = reorder(ArrayType, AUC_Normalized), y = AUC_Normalized, fill = Tier)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("🥇 Gold (Excellent)" = "#FFD700", 
+                               "🥈 Silver (Good)" = "#C0C0C0", 
+                               "🥉 Bronze (Fair)" = "#CD7F32", 
+                               "⚠️ Low Performance" = "#E57373")) +
+  labs(title = "Microarray Accuracy Scores (AUC Normalized)",
+       x = "Microarray Type",
+       y = "Accuracy Score (0-1)",
+       fill = "Tier") +
+  theme_minimal()
+
+```
+
+## Best / Worst performing microarrays
+
+```{r, echo=FALSE}
+
+# Extract the names of the top and bottom arrays
+best_array_name  <- auc_results$ArrayType[1]
+worst_array_name <- auc_results$ArrayType[nrow(auc_results)]
+
+# Optional: Extract the scores for the titles
+best_score  <- round(auc_results$AUC_Normalized[1], 3)
+worst_score <- round(auc_results$AUC_Normalized[nrow(auc_results)], 3)
+
+
+```
+
+### 🥇 Top Performer: `r best_array_name` (Score: `r best_score`)
+### ⚠️ Worst Performer: `r worst_array_name` (Score: `r worst_score`)
+

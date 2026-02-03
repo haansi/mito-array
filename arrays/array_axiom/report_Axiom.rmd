@@ -1,0 +1,98 @@
+---
+title: "CheckThermoFisher"
+author: "Hansi"
+date: "2025-12-12"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(forcats)
+```
+
+## Compare the Axiom and Affymetrix Microarrays
+
+
+
+```{r, echo=FALSE, fig.width=12}
+
+
+# 1. GET LIST OF CSV FILES AND NAMES
+# (Assuming your working directory is correctly set)
+file_list <- list.files(path="data", pattern = "\\.csv$", full.names= TRUE)
+
+
+remove_indices <- grep("Axiom_GW_EUR_MT|Axiom_GW_PanAFR_MT|Axiom_UKB_WCSG_MT", file_list)
+
+
+# Keep all files EXCEPT those at the remove_indices
+file_list <- file_list[-remove_indices]
+
+
+df_names <- sub("\\.csv$", "", basename(file_list))
+
+# 2. CREATE A NAMED VECTOR FOR ITERATION
+files_named <- setNames(file_list, df_names)
+
+# 3. READ, SUBSET, AND BIND IN ONE STEP (FIXED)
+final_combined_df_tidy <- files_named %>%
+  # map_dfr processes the list and automatically row-binds the results
+  # The .id argument is where the magic happens: it takes the list element 
+  # name (e.g., "Axiom_APMRA") and creates a new column with that name
+  map_dfr(~ read.csv(., header = FALSE, sep = ",") %>% 
+             select(1:15), 
+          .id = "source_id") # <-- THIS is the correct way to add the ID column
+
+summary_table <- final_combined_df_tidy %>%
+  group_by(source_id) %>%
+  summarise(position_count = n())
+
+
+is_duplicate <- duplicated(final_combined_df_tidy[ , c("source_id", "V7")])
+#print(sum(is_duplicate))
+
+final_combined_df_unique <- final_combined_df_tidy[!is_duplicate, ]
+
+summary_table_unique <- final_combined_df_unique %>%
+  group_by(source_id) %>%
+  summarise(position_count = n())
+
+
+write.table(summary_table, file="output/summary_table_axiom.txt", col.names = FALSE, row.names = FALSE)
+
+write.table(final_combined_df_tidy, file="output/table_axiom_full.txt", col.names = FALSE, row.names = FALSE)
+write.table(final_combined_df_unique, file="output/table_axiom_unique.txt", col.names = FALSE, row.names = FALSE)
+
+
+# merge dataframes for difference plot
+df1_labeled <- final_combined_df_tidy %>% mutate(dataset = "Total Entries")
+df2_labeled <- final_combined_df_unique %>% mutate(dataset = "Unique Entries")
+
+# 2. Combine them into one dataframe
+df_combined <- bind_rows(df1_labeled, df2_labeled)
+
+# 3. Plot
+ggplot(df_combined, aes(x = fct_infreq(source_id), fill = dataset)) +
+  geom_bar(position = "dodge") + # 'dodge' puts bars side-by-side
+  labs(
+    x = "Group",
+    y = "Count",
+    fill = "Data Source",
+    title = "Comparison: Total vs. Unique Entries by Group"
+  ) +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=0.5)) + theme(legend.position="bottom") 
+
+
+ggplot(final_combined_df_unique, aes(x=V7, y=source_id)) + geom_point()
+
+rows_removed <- nrow(final_combined_df_tidy) - nrow(final_combined_df_unique)
+print(paste("Original rows:", nrow(final_combined_df_tidy)))
+print(paste("Unique rows:", nrow(final_combined_df_unique)))
+print(paste("Duplicates removed:", rows_removed))
+
+
+```

@@ -1,0 +1,15 @@
+"Axiom_APMRA" 943
+"Axiom_BioBank1" 101
+"Axiom_GW_AFR" 96
+"Axiom_GW_ASI" 233
+"Axiom_GW_CHB2" 95
+"Axiom_GW_EAS" 73
+"Axiom_GW_EUR" 99
+"Axiom_GW_HuOrigin" 256
+"Axiom_GW_Hu_SNP" 262
+"Axiom_GW_LAT" 120
+"Axiom_GW_PanAFR" 281
+"Axiom_PMDA" 714
+"Axiom_PMRA_r3" 224
+"Axiom_UKB_WCSG" 354
+"GenomeWideSNP_6" 411

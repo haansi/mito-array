@@ -60,7 +60,7 @@ ggplot(allDeepUnique, aes(x=Dataset)) + geom_bar() + stat_count(geom = "text", c
 ggplot(allDeep_dist, aes(x=Dataset)) + geom_bar() + stat_count(geom = "text", colour = "white", size = 3.5, aes(label = after_stat(count)),position=position_stack(vjust=0.5)) + ggtitle("All datasets with distinct haplotypes, favoring 1000G over HGDP and SGDP")
 
 ```
-Annotate IGSR Samples
+## Annotate IGSR Samples
 
 ```{r, echo=FALSE}
 
@@ -244,7 +244,9 @@ for (group_name in names(list_of_superpopulations)) {
   write.csv(list_of_superpopulations[[group_name]], 
             file = paste0("output/ref_", group_name, ".csv"), 
             row.names = FALSE)
-write.csv(x = combined_df, file="input_ALL.csv", row.names = FALSE)
+  
+  
+write.csv(x = combined_df, file="output/ref_ALL.csv", row.names = FALSE)
 }
 
 
