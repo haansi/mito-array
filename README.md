@@ -1,8 +1,3 @@
----
-editor_options: 
-  markdown: 
-    wrap: 72
----
 
 # mito-array
 
@@ -21,13 +16,23 @@ The repository contains the main folders:
     (n=3,515), which results to the input files for subsequent
     validation, split by the super populations AFR, AMR, EAS, EUR, SAS.
 
--   **comparison_overview**: the microarrays are compared based on the
-    amount of mitochondrial variants, and grouped into the 10 main
-    clusters
+-   **reference**: how to get to the population specific references
+
+-   **bin**: haplogrep 2.4 for haplogroup assignment and distance calculation
+    between expected and found haplogroup.
+    
+-   **scripts**: folder with scripts needed for processing and generating
+    reference panels, microarray files with mtDNA genotypes only,...
+
+-   **arrays**: this includes microarray informations with mt-SNPs, currently
+    for array_afr -> Lankheet et al study with validation and graphical reports
+    as well as array_axiom for getting meta-informations about mt-SNPs (mostly Axiom)
+
+## TODO
 
 -   **comparison_haplogroups:** here the different populations as well
     as the entire mt-phylogeny serve for benchmarking of the main
-    microarrays
+    microarrays - main results -> need to cleanup local code
 
 -   **check_VCF:** here an own VCF file can be specified and compared to
     some representative microarrays, ideal for quality control purposes
