@@ -1,0 +1,300 @@
+---
+title: "Compare MT content for genotyping arrays"
+author: "Hansi"
+date: "2025-08-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(proxy)
+library(cluster)  
+library(factoextra)
+library(ggpubr)
+```
+
+## Cenotying arrays - Overview
+
+This comparison gives an overview of the SNP counts per microarray from Will Rayners page <https://www.strand.org.uk/> as well as from the ThermoFisher (denoted here as Axiom, including the Affymetrix 6 chip).
+
+```{r, warnings=FALSE, message=FALSE, echo=FALSE, fig.width=12, fig.height=20}
+
+
+# --- 1. Load data from files with and without variants ---
+illumina_data <- "data/merged_MT_data_strand2.csv"
+illumina_empty <- "data/empty_microarrays_strand.txt"
+axiom_summary<-read.table("../array_axiom/output/summary_table_axiom.txt")
+axiom_data <- read.table("../array_axiom/output/table_axiom_full.txt")
+
+haplogrep_annotation<-read.delim("../../reference/mtDNA/rcrs_annotated_2025_12_16.txt")
+maplocus<-read.delim("../../reference/mtDNA/maplocus.txt")
+
+
+
+# Read the merged data from files that had variants
+# Handle the case where the file might not exist
+if (!file.exists(illumina_data)) {
+  # If the file doesn't exist, create an empty data frame
+  variant_counts <- data.frame(Microarray_ID = character(), Variant_Count = numeric())
+} else {
+  merged_data <- read.delim(illumina_data, header = FALSE, col.names = c("Microarray_ID", "SNP_ID", "Region", "Position", "Match_Percent", "Strand", "Allele"))
+  variant_counts <- merged_data %>%
+    group_by(Microarray_ID) %>%
+    summarise(Variant_Count = n())
+}
+
+# Read the list of empty files and create a data frame
+# Handle the case where the file might not exist or be empty
+if (!file.exists(illumina_empty) || file.size(illumina_empty) == 0) {
+  empty_counts <- data.frame(Microarray_ID = character(), Variant_Count = numeric())
+} else {
+  empty_files <- readLines(illumina_empty)
+  empty_microarray_ids <- gsub("_MT.txt", "", empty_files)
+  empty_counts <- data.frame(Microarray_ID = empty_microarray_ids, Variant_Count = -100)
+}
+
+# --- 2. Combine all data into a single data frame ---
+all_counts <- bind_rows(variant_counts, empty_counts) %>%
+  arrange(desc(Variant_Count)) %>%
+  # Add a status column for color coding the plot
+  mutate(Status = ifelse(Variant_Count > 0, "Illumina SNPs", "Zero Variants"))
+
+# --- 3. Generate the combined report ---
+
+axiom_summary$V3<-"Axiom"
+axiom_summary <- setNames(axiom_summary, colnames(all_counts))
+
+all_counts_axiom <- rbind(all_counts, axiom_summary)
+
+
+# Create a single, horizontal bar chart with color distinction
+plot <- ggplot(all_counts, aes(x = reorder(Microarray_ID, Variant_Count), y = Variant_Count, fill = Status)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Illumina SNPs" = "steelblue", "Zero Variants" = "coral")) + # Use distinct colors
+  labs(
+    title = "MT variant counts over Illumina genotyping arrays",
+    subtitle = "Zero-count microarrays are highlighted",
+    x = "Microarray ID",
+    y = "Number of Variants",
+    fill = "Status"
+  ) +
+  coord_flip() + # Flip the coordinates for readability
+  theme(legend.position = "bottom")
+
+print(plot)
+
+# Save the plot with adjusted dimensions
+ggsave("output/combined_variant_counts_report.png", plot, width = 12, height = 20, units = "in")
+
+
+# Create a single, horizontal bar chart with color distinction
+plot1 <- ggplot(all_counts_axiom, aes(x = reorder(Microarray_ID, Variant_Count), y = Variant_Count, fill = Status)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+   scale_fill_manual(values = c("Illumina SNPs" = "steelblue", "Zero Variants" = "coral", "Axiom"="cadetblue")) + # Use distinct colors
+  labs(
+    title = "MT variant counts over all genotyping arrays investigated",
+    subtitle = "Zero-count microarrays are highlighted",
+    x = "Microarray ID",
+    y = "Number of Variants",
+    fill = "Status"
+  ) +
+  coord_flip() + # Flip the coordinates for readability
+  theme(legend.position = "bottom")
+
+print(plot1)
+
+# Save the plot with adjusted dimensions
+ggsave("output/combined_variant_counts_axiom.png", plot1, width = 12, height = 20, units = "in")
+
+```
+
+## Check SNP distribution
+
+Get an idea of how the MT-SNPs are distributed over the entire mitochondrial genome, and check if there are hotspot areas.
+
+```{r, echo=FALSE, fig.width=12}
+
+SNPids_df<-merged_data %>%
+  group_by(SNP_ID, Position, Strand, Allele ) %>%
+  select (SNP_ID, Position, Strand, Allele) %>%
+  distinct(SNP_ID, Position, Strand, Allele)
+
+write.table(SNPids_df, file="output/snpIDs.txt", row.names = FALSE, sep="\t")
+
+merged_data$Position<-as.numeric(merged_data$Position)
+
+combined_df <- bind_rows(
+  merged_data %>% select(Microarray_ID, Position),
+  axiom_data %>% select(Microarray_ID = V1, Position = V7)
+)
+
+
+combined_df <- combined_df %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "-b37-strand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, ".b37.strand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "-SourceStrand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "-Source.strand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "-manifest-file")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "Illmn.strand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "SOURCE.strand")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, ".annot")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "b37")) %>%
+  group_by(Microarray_ID) %>%
+  mutate(n_snps = n_distinct(Position)) %>%
+  ungroup() %>%
+  mutate(id_label = paste0(Microarray_ID, " (", n_snps, ")"))
+
+
+haplogrep_annotation <- haplogrep_annotation %>%
+  mutate(Position = parse_number(Mutation))
+
+haplo_unique <- haplogrep_annotation %>%
+  distinct(Position, .keep_all = TRUE) %>%
+  select(Position, Maplocus, Category)
+
+merged_annotated <- combined_df %>%
+  left_join(haplo_unique, by = "Position")
+
+ggplot(merged_annotated, aes(x=Maplocus)) + geom_bar(aes(fill=Category)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "bottom") +ggtitle("All variants over all arrays annotated with locus")
+
+maplocus_summary <- merged_annotated %>%
+     group_by(Maplocus, Category) %>%
+     summarise(
+         amount = n()
+     )
+
+maplocus_merged<-merge(maplocus_summary, maplocus, by.x="Maplocus", by.y="MapLocus")
+maplocus_merged$sizeadjusted<-maplocus_merged$amount/maplocus_merged$length
+
+ggplot(maplocus_merged, aes(x=Maplocus, y=sizeadjusted)) + geom_point(aes(color=Category)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "bottom") +ggtitle("All variants over all arrays annotated with locus", subtitle="Gene-size adjusted")
+
+maplocus_merged_cat <- maplocus_merged %>%
+     group_by(Category) %>%
+     summarise(
+         Catsum = sum(amount), 
+        Catlength=sum(length)   
+     )
+
+ggplot(maplocus_merged_cat, aes(x=Category, y=Catsum/Catlength)) + geom_point(aes(color=Category)) + stat_compare_means() + ylim(0,4)  +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "bottom")+ggtitle("All variants over all arrays grouped by majo locus-category", subtitle="Gene-size adjusted")
+
+
+```
+
+## Clustering Analysis of Arrays
+
+Preparing a matrix with all microarrays and all possible Variants observed over all arrays we calculate the Jaccard distance
+
+```{r, echo=FALSE, fig.width=18, fig.height=12}
+counts_table <- table(combined_df$id_label, combined_df$Position)
+binary_matrix <- as.data.frame.matrix(counts_table > 0) + 0
+
+
+jac_dist <- proxy::dist(as.matrix(binary_matrix), method = "Jaccard")
+
+# Hierarchical Clustering
+hc <- hclust(jac_dist, method = "ward.D2")
+
+smc_dist <- proxy::dist(as.matrix(binary_matrix), method = "Simple Matching")
+hc_smc <- hclust(smc_dist, method = "ward.D2")
+
+
+fviz_nbclust(as.matrix(binary_matrix), hcut, method = "silhouette", hc_method = "ward.D2")
+
+# 5. Visualization
+# This creates a dendrogram to see design similarity
+
+glasbey_colors <- c(
+  "#0000FF", "#FF0000", "#00FF00", "#000033", "#FF00B6", 
+  "#005300", "#FFD300", "#009FFF", "#9A4D42", "#aac000"
+)
+
+p<-fviz_dend(hc, k =10, k_colors=glasbey_colors, cex = 0.6, type="rectangle", main = "Cluster Dendrogram of Microarray Designs",xlab = "Microarray ID",  ylab = "Jaccard Distance", labels_track_height = 2) 
+
+p2<-fviz_dend(hc_smc, k =10, k_colors=glasbey_colors, cex = 0.6, type="rectangle", main = "Cluster Dendrogram of Microarray Designs",xlab = "Microarray ID",  ylab = "Jaccard Distance", labels_track_height = 2) 
+
+plot(p)
+
+
+ggsave("output/dendrogram_jaccard.pdf", p, width = 18, height = 12)
+ggsave("output/dendrogram_simple_matching.pdf", p, width = 18, height = 12)
+
+
+```
+
+## Check RefAlt files
+
+Use SNP-IDs prepared previously to run over all .RefAlt files downloaded from here: <https://www.chg.ox.ac.uk/~wrayner/strand/RefAlt/> and unzipped in own folder with mergeSnpIDs.py - this was the first version in assessing the SNPs present.
+
+```{r, warnings=FALSE, message=FALSE, echo=FALSE }
+refAlt_df <- read.delim("data/matched_snps.RefAlt.txt")
+
+
+variant_counts <- refAlt_df %>%
+  group_by(Filename) %>%
+  summarise(num_variants = n()) %>%
+  arrange(desc(num_variants))
+
+p<-ggplot(variant_counts, aes(x = num_variants, y = reorder(Filename, num_variants))) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Number of Variants per Filename in RefAlt files",
+    x = "Variant Count",
+    y = "Filename"
+  ) + theme_minimal()
+
+length(unique(refAlt_df$Filename))
+
+
+snp_refAlt_df<-merge(refAlt_df, SNPids_df, by.x="SNP_ID", by.y="SNP_ID", all.x=TRUE)
+
+snp_refAlt_pos_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="+",], by.x="SNP_ID", by.y="SNP_ID", all.x=TRUE)
+snp_refAlt_pos_df$Position<-as.numeric(snp_refAlt_pos_df$Position)
+
+snp_refALT_pos_filt_df <- snp_refAlt_pos_df %>%
+  select(SNP_ID, Filename, Position) %>%
+  distinct(SNP_ID, Filename, Position)
+
+snp_refAlt_neg_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="-",], by.x="SNP_ID", by.y="SNP_ID", all.x=TRUE)
+
+
+
+
+```
+
+## Prominent microarrays 
+
+A quick overview of important microarrays - to be completed with a more detailed comparison with data of Will Rayner needed. 
+
+| Vendor (platform) | Total markers (published) | Mitochondrial (mtDNA) markers | Source / where to get full list |
+|-----------------|----------------:|----------------------:|-----------------|
+| **Illumina --- Infinium Global Screening Array (GSA-24 v3.0)** | 654,027 total markers (v3 datasheet) | **1,138 mitochondrial markers**. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/infinium-global-screening-array-data-sheet-370-2016-016.pdf "Infinium Global Screening Array-24 v3.0 BeadChip")) | Illumina GSA datasheet; Illumina product page and array **manifest** (downloadable from Illumina support/product page). ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/infinium-global-screening-array-data-sheet-370-2016-016.pdf "Infinium Global Screening Array-24 v3.0 BeadChip")) |
+| **Illumina --- Infinium Global Diversity Array (GDA, GDA-8 / GDA-8 w/PGx)** | \~1.8--1.9M markers (product page / datasheet) | **\~1,346 mitochondrial markers** reported on the GDA datasheet. ([illumina.com](<https://www.illumina.com/products/by-type/microarray-kits/infinium-global-diversity.html?utm_source=chatgpt.com> "Infinium Global Diversity Array-8 Kit | Multiethnic human genotyping")) |
+| **Illumina --- Infinium Omni5-4 (Omni5)** | \~4,327,108 total markers (Omni5 v1.2) | **209 mitochondrial markers** (Omni5 datasheet). ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/datasheet_omni5.pdf "Infinium Omni5-4 v1.2 BeadChip")) | Omni5 datasheet + manifest. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/datasheet_omni5.pdf "Infinium Omni5-4 v1.2 BeadChip")) |
+| **Illumina --- Multi-Ethnic Global Array (MEG-Array)** | \~1.7M (MEGA), up to \>2M (MEGA-EX) markers (datasheet) | **1,349 mitochondrial markers**. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/multi-ethnic-genotyping-array-data-sheet-370-2016-031.pdf "Multi-Ethnic Genotyping Array (MEGA) Data Sheet")) | Illumina MEGA datasheet ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/multi-ethnic-genotyping-array-data-sheet-370-2016-031.pdf "Multi-Ethnic Genotyping Array (MEGA) Data Sheet")); **Direct manifest download:** [MEGA-EX v1.0 manifest CSV](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/multi-ethnic-global-array/infinium-mega-ex-1-0-b2-manifest-file-csv.zip "Illumina MEGA-EX v1.0 Manifest (CSV)") |
+| **Thermo Fisher / Applied Biosystems --- Axiom PangenomiX Array** | \>800,000 markers in GWAS module (total \>900k in whole array designs) | **\>1,100 common mitochondrial variants** (datasheet lists "common mitochondrial DNA variants \>1,100"). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/GSD/Datasheets/axiom_pangenomix_array_datasheet.pdf "Axiom PangenomiX Array")) | Thermo Fisher Axiom PangenomiX datasheet; Thermo Fisher provides array manifests (Axiom annotation files) for download. ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/GSD/Datasheets/axiom_pangenomix_array_datasheet.pdf "Axiom PangenomiX Array")) |
+| **Thermo Fisher / Axiom --- Axiom Genome-Wide PanAFR (Pan-African)** | \~2.2M markers (PanAFR array set) | **\~288 (miRNA-associated + mitochondrial category listed as 288 in the PanAFR datasheet)** --- PanAFR groups miRNA-associated *and* mitochondrial together in the breakdown. (See datasheet table.) ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/axiom_panafr_arrayplate_datasheet.pdf "Data Sheet,Axiom Genome-Wide Pan-African Array Set")) | PanAFR datasheet; full manifest / probe lists available from Thermo Fisher (Axiom annotation downloads). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/axiom_panafr_arrayplate_datasheet.pdf "Data Sheet,Axiom Genome-Wide Pan-African Array Set")) |
+| **Thermo Fisher / Axiom --- UK Biobank Array** | \~823,132 total markers | **265 mitochondrial markers**. ([ukbiobank.ac.uk](https://biobank.ndph.ox.ac.uk/ukb/ukb/docs/ukb_genotyping_qc.pdf "UK Biobank Axiom Array Genotyping and QC Documentation")) | UK Biobank Axiom manifest (Thermo Fisher / UKB documentation) ([ukbiobank.ac.uk](https://biobank.ndph.ox.ac.uk/ukb/ukb/docs/ukb_genotyping_qc.pdf "UK Biobank Axiom Array Genotyping and QC Documentation")); **Direct manifest download:** [UKB Axiom v2 manifest TSV](https://biobank.ctsu.ox.ac.uk/crystal/crystal/docs/UKBiobank_genotyping_manifest_v2.tsv "UK Biobank Axiom v2 Manifest (TSV)") |
+| **Affymetrix / Thermo Fisher --- Genome-Wide Human SNP Array 6.0 (Affy SNP 6.0)** | \~1.8 million features (\~906,600 SNPs + \~946,000 CNV probes) | **\~411 mitochondrial SNPs** (reported in platform comparison literature / platform summaries). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/genomewide_snp6_datasheet.pdf?utm_source=chatgpt.com "[PDF] Data Sheet - Genome-Wide Human SNP Array 6.0"), [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC8532338/?utm_source=chatgpt.com "The performance of common SNP arrays in assigning African ...")) | Affymetrix SNP 6.0 datasheet and GEO/UCSC annotation pages; probe lists / manifest available from Affymetrix/Thermo Fisher archives. ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/genomewide_snp6_datasheet.pdf?utm_source=chatgpt.com "[PDF] Data Sheet - Genome-Wide Human SNP Array 6.0"), [genome.ucsc.edu](https://www.genome.ucsc.edu/cgi-bin/hgc?c=chr1&db=hg19&g=snpArrayAffy6SV&hgsid=1146697277_MXWmzZJmhfUFgz0PtthStOaIVj0s&i=CN_435170&l=145061905&o=145311523&r=145500787&t=145311549&utm_source=chatgpt.com "hg19 Human: Affymetrix SNP 6.0 Structural Variation (CN_435170)")) |
+| **Agilent --- SurePrint CGH + SNP microarrays (e.g., 2×400K, 4×180K, 1×1M CGH+SNP)** | CGH + SNP probe totals vary by design (examples: 2×400K = 292,097 CGH + 119,091 SNP probes; 1×1M CGH \~963K probes) | **Vendor does not publish a single "mtDNA SNP count" for CGH+SNP products.** Agilent's CGH+SNP product pages list total SNP probe counts and full probe manifests (SureDesign) --- mitochondrial probes may be included in the SNP probe set, but Agilent does not provide a discrete, published mtDNA SNP tally on the main datasheets. ([agilent.com](<https://www.agilent.com/en/product/cgh-cgh-snp-microarray-platform/cgh-cgh-snp-microarrays/human-microarrays/sureprint-g3-cgh-cgh-snp-microarrays-3425562> "SurePrint G3 CGH & CGH+SNP Microarrays | Agilent")) |
+
+## Check some of the files from vendors
+
+Download some of the above microarrays strand files or bed files if available and compare to the Rayner files.
+
+| microarray | date deposited | chrM | link | microarray_ID |
+|---------------|---------------|---------------|---------------|---------------|
+| [Infinium Global Screening Array v3.0. GSA](https://emea.support.illumina.com/downloads/infinium-global-screening-array-v3-0-support-files.html) | Aug 12, 2019 | 1138 | [BED file](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/global-screening-array-24/v3-0/infinium-global-screening-array-24-v3-0-a1-bed.zip) | GSA-24v3-0_A1 |
+| [Infinium Global Diversity Array 8 v1.0. GSD](https://support.illumina.com/array/array_kits/infinium-global-diversity-array.html) | Apr 19, 2021 |  | [BED file](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/global-diversity-array/infinium-global-diversity-array-8-v1-0_D1.bed) |  |
+
+```{r, warnings=FALSE, message=FALSE }
+
+
+```
