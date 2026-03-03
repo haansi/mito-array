@@ -1,0 +1,882 @@
+---
+title: "VCF mtDNA check "
+author: "Hansi"
+date: "July 28, 2025"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# Global options for all chunks
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(vcfR)
+library(seqinr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(networkD3)
+
+
+source("../../scripts/haplogroup_processing.R")
+
+```
+
+
+# Introduction
+This R Markdown document performs a series of tasks on a VCF file, a FASTA reference, and a Haplogrep input file. The process involves: 
+    - Checking the VCFs reference alleles against a FASTA file.
+    - Swapping variants where the ALT allele matches the reference.
+    - Generating a list of variant positions to update the Range column in a Haplogrep input file.
+    - Comparing the haplogroup performance to some common genotyping arrays (best-case-scenarios)
+
+
+
+
+# Parameters 
+
+```{r }
+
+
+# Replace with your VCF file path
+#
+# Other 1000G microarrays (Affy 6, axiom, or Illumina Omni to be found here  https://www.internationalgenome.org/category/omni/ 
+
+
+vcf_file <- "data/example-microarray.vcf"
+
+fasta_file <- "../../reference/mtDNA/chrM.fasta" 
+
+###HaploGrep Phylotree 17 files
+#------------------------------
+#phylotreeVersion<-"17"
+#haplogrep_input_file <- "../../reference/mtDNA/phylotree17.hsd" 
+#weights<-"../../reference/mtDNA/phylotree17_weights.txt"
+
+###HaploGrep Phylotree 17 FU1 files 
+#----------------------------------
+phylotreeVersion<-"17_FU1"
+haplogrep_input_file <- "../../reference/mtDNA/phylotree17FU1_mod.hsd" 
+weights<-"../../reference/mtDNA/phylotree17FU1_weights.txt"
+
+#small test data not to run over the entire phylogenetic tree
+#haplogrep_input_file <- "../../reference/mtDNA/phylotree17FU1_weights.txt" 
+
+output_haplogrep_file <- "output/modified_haplogrep_input.txt" 
+haplogroup_distcheck_file <-"output/haplogroup.distcheck.txt" 
+haplogroup_distcheck_result_file <-"output/haplogroup.distcheckResult.txt"
+
+#for simple comparison reasons - check with Illumina GSA (best) and Illumina Omni (low-performer)
+
+array_omni_file <- "data/arrays/InfiniumOmni2-5-8v1-5_A1.txt"
+array_gsa_file <-  "data/arrays/GSA-24v3-0_A1.txt"
+array_mega_file <- "data/arrays/Multi-EthnicGlobal_D.grch18.chrM.txt"
+array_axiom_ukb_file <- "data/arrays/Axiom_UKB.txt"
+#array_gsa4_file <-  "data/arrays/GSA-PGx-48v4.MT.txt"
+#array_mega_A1_file <-"data/arrays/Multi-EthnicGlobal_A1-b37-strand_MT.txt"
+#array_mega_D1_file <-"data/arrays/Multi-EthnicGlobal_D1-b37-strand_MT.txt"
+
+```
+
+
+# Check reference 
+
+```{r, warning=FALSE, echo=FALSE }
+
+# ==============================================================================
+# Step 1: Check Reference Variants against FASTA and Plot
+# ==============================================================================
+message("Step 1: Checking reference variants against FASTA...")
+
+# --- Step 0: Load VCF and FASTA ---
+vcf <- read.vcfR(vcf_file, verbose = FALSE)
+weightsPhylo<-read.delim(weights)
+
+# Robust FASTA file reader to handle line breaks
+fasta_lines <- readLines(fasta_file)
+fasta_header_idx <- grep("^>", fasta_lines)
+fasta_sequence_lines <- fasta_lines[-fasta_header_idx]
+fasta_sequence <- paste(fasta_sequence_lines, collapse = "")
+fasta_sequence <- toupper(str_replace_all(fasta_sequence, "[^A-Z]", ""))
+
+# --- Helper function to get a base from the fasta object ---
+# This version works with a single sequence string
+get_fasta_base <- function(fasta_sequence, chrom, pos) {
+  
+  if (nchar(fasta_sequence) == 0) {
+    stop("FASTA sequence is empty. Please check your FASTA file for sequence data.")
+  }
+
+  if (pos > nchar(fasta_sequence) || pos < 1) {
+    warning(paste("Position", pos, "is out of bounds for chromosome", chrom, ". Skipping variant."))
+    return(NA)
+  }
+  
+  return(substr(fasta_sequence, pos, pos))
+}
+
+# Get reference alleles from FASTA based on VCF coordinates
+vcf_fix <- vcf@fix
+if (nrow(vcf_fix) == 0) {
+    stop("VCF file appears to be empty or contains no variants. Cannot proceed.")
+}
+
+fasta_ref_alleles <- mapply(get_fasta_base,
+                            chrom = vcf_fix[, "CHROM"],
+                            pos = as.numeric(vcf_fix[, "POS"]),
+                            MoreArgs = list(fasta_sequence = fasta_sequence))
+
+# Filter out variants where no FASTA base could be found
+valid_variants <- !is.na(fasta_ref_alleles)
+if (sum(valid_variants) == 0) {
+    stop("! No valid variants remain after matching to the FASTA reference.")
+}
+vcf_fix <- vcf_fix[valid_variants, ]
+fasta_ref_alleles <- fasta_ref_alleles[valid_variants]
+vcf <- vcf[valid_variants, ]
+
+# Create a data frame for comparison
+ref_comparison_df <- data.frame(
+    POS= as.integer(vcf_fix[, "POS"]),
+    VCF_ID = as.character(vcf_fix[, "ID"]),
+    VCF_REF = as.character(vcf_fix[, "REF"]),
+    VCF_ALT = as.character(vcf_fix[, "ALT"]),
+    FASTA_REF = as.character(fasta_ref_alleles),
+    stringsAsFactors = FALSE
+)
+
+
+
+# Count occurrences for plotting
+plot_data <- ref_comparison_df %>%
+    dplyr::mutate(Match = ifelse(VCF_REF == FASTA_REF, "Matches FASTA", "Mismatches FASTA")) %>%
+    dplyr::group_by(VCF_REF, Match) %>%
+    dplyr::summarise(Count = n(), .groups = 'drop')
+
+ggplot_ref_check <- ggplot(plot_data, aes(x = VCF_REF, y = Count, fill = Match)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(aes(label = Count), vjust = -0.5, position = position_dodge(width = 0.9)) +
+    labs(
+        title = "Reference Allele Consistency with FASTA",
+        x = "VCF Reference Allele",
+        y = "Number of Occurrences",
+        fill = "Comparison"
+    ) +
+    theme_minimal() +
+    scale_fill_manual(values = c("Matches FASTA" = "lightgreen", "Mismatches FASTA" = "darkred")) + theme(legend.position="bottom")
+
+print(ggplot_ref_check)
+message("Step 1: Reference check complete and plot generated.")
+
+
+
+```
+
+# Check Phylogenetic relevance of POS
+
+```{r, warning=FALSE, echo=FALSE }
+
+
+
+ref_comparison_df$VARIANT<-paste(ref_comparison_df$POS, ref_comparison_df$VCF_ALT, sep="")
+checkPhyloWeights<-merge(ref_comparison_df, weightsPhylo, by.x="VARIANT", by.y="Mutation", all.x=TRUE)
+
+checkPhyloWeights$countN[is.na(checkPhyloWeights$countN)] <- 0
+
+ggplot(checkPhyloWeights, aes(x=POS, y=countN)) + geom_point(aes(color=countN>0)) + facet_wrap(~countN>0, ncol=1) + labs(title="Phylogenetically relevant positions along chrM", subtitle="TRUE=in Phylotree, FALSE=not in Phylotree") + theme_minimal() + scale_color_manual(values = c("TRUE" = "lightgreen", "FALSE" = "darkred")) + theme(legend.position="bottom")
+
+ggplot(checkPhyloWeights, aes(x=countN, fill = as.factor(countN == 0))) + geom_bar() +
+    theme_minimal() +
+    scale_fill_manual(
+        name = "Positions phylogenetically relevant",
+        values = c("TRUE" = "darkred", "FALSE" = "lightgreen"),
+        labels = c("TRUE" = "unknown", "FALSE" = "relevant for haplogroup")
+    ) + theme(legend.position="bottom")
+```
+
+
+# Try fixing issues if any 
+
+```{r, warning=FALSE, echo=FALSE }
+                                                                                             #===============================================================================
+# Step 2: Swap REF/ALT and Genotypes
+# ==============================================================================
+message("\nStep 2: Identifying variants to swap...")
+
+vcf_alt_alleles <- vcf_fix[, 'ALT']
+fasta_at_alt_pos <- mapply(get_fasta_base,
+                           chrom = vcf_fix[, "CHROM"],
+                           pos = as.numeric(vcf_fix[, "POS"]),
+                           MoreArgs = list(fasta_sequence = fasta_sequence))
+
+if (all(is.na(fasta_at_alt_pos))) {
+    stop("Failed to get FASTA reference for any ALT alleles. Stopping.")
+}
+
+idx_to_swap <- which(vcf_alt_alleles == fasta_at_alt_pos)
+
+if (length(idx_to_swap) > 0) {
+    message(paste0("Found ", length(idx_to_swap), " variants to swap. Swapping REF/ALT and genotypes..."))
+
+    swapped_variants_table <- data.frame(
+        CHROM = vcf_fix[idx_to_swap, 'CHROM'],
+        POS = vcf_fix[idx_to_swap, 'POS'],
+        Original_REF = vcf_fix[idx_to_swap, 'REF'],
+        Original_ALT = vcf_alt_alleles[idx_to_swap]
+    )
+
+    original_ref_to_swap <- vcf@fix[idx_to_swap, 'REF']
+    original_alt_to_swap <- vcf@fix[idx_to_swap, 'ALT']
+
+    vcf@fix[idx_to_swap, 'REF'] <- original_alt_to_swap
+    vcf@fix[idx_to_swap, 'ALT'] <- original_ref_to_swap
+
+    genotypes <- vcf@gt
+    if ("GT" %in% colnames(genotypes)) {
+        for (i in idx_to_swap) {
+            current_gt <- genotypes[i, "GT"]
+            swapped_gt <- stringr::str_replace_all(current_gt, "0", "temp_0")
+            swapped_gt <- stringr::str_replace_all(swapped_gt, "1", "0")
+            swapped_gt <- stringr::str_replace_all(swapped_gt, "temp_0", "1")
+            vcf@gt[i, "GT"] <- swapped_gt
+        }
+        message("REF/ALT and genotypes swapped successfully.")
+    }
+
+    message("Table of swapped variants:")
+    print(swapped_variants_table)
+
+} else {
+    message("No variants found where ALT matches FASTA. No swaps performed.")
+}
+
+```
+
+
+
+```{r, warning=FALSE, echo=FALSE }
+
+#Comparison to VCFs genotyping arrays definitions - this is an example and needs adaptations
+
+
+#if genotyping array known, check if variants are identical 
+# e.g. here assuming the VCF was a MEGA Array - Problem is that exact version has to be known
+
+#mega<-merge(ref_comparison_df, microArrayMega, by.y="V3", by.x="POS", all.y=TRUE) 
+#mega$found<-ifelse(is.na(mega$VCF_REF), 0,1)
+
+#ggplot(mega, aes(x=POS, y=found)) + geom_point(aes(color=found)) + ggtitle("Variants present on MEG-Array (1=yes, 0=not found)")
+
+#ggplot(mega, aes(x = POS, y = found, color = factor(found))) +  geom_point(position = position_jitter(height = 0.1, seed = 123)) +  scale_color_manual(values = c("0" = "red", "1" = "blue"),  labels = c("0" = "Not Found", "1" = "Found")) +   labs(title = "Variants Present on MEG-Array", x = "Position", y = "Found (0 = No, 1 = Yes)", color = "Variant Status") +   theme_minimal() # A clean theme
+
+```
+
+
+# Prepare Haplogrep files + run HaploGrep2 
+
+```{r, warning=FALSE, echo=FALSE}
+
+
+# ==============================================================================
+# Step 3: Update Haplogrep File
+# ==============================================================================
+message("\nStep 3: Preparing and updating Haplogrep file...")
+
+final_pos <- vcf@fix[, 'POS']
+concatenated_positions <- paste(final_pos, collapse = ";")
+message(paste("Generated position string:", substr(concatenated_positions, 1, 100), "..."))
+
+hsd_data <- read.delim(haplogrep_input_file, sep = "\t", stringsAsFactors = FALSE)
+hsd_data[[3]]<-""
+hsd_data[[2]] <- concatenated_positions
+
+hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+
+message("Haplogrep data updated. First few rows:")
+
+write.table(hsd_data, file = output_haplogrep_file, sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+message(paste("\nProcessing complete. Modified Haplogrep file saved to:", output_haplogrep_file))
+
+
+
+
+# ==============================================================================
+# Step 4: run Haplogrep File
+# ==============================================================================
+
+# Detect OS type
+is_windows <- .Platform$OS.type == "windows"
+
+# Use file.path() to build platform-safe paths
+jar_path <- ("../../bin/haplogrep.jar")
+#input_file <- "data/example.hsd"
+input_file <- output_haplogrep_file
+output_file <- "haplogroups.txt"
+
+# Optional: Normalize paths (for more complex cases)
+jar_path <- normalizePath(jar_path, winslash = "/", mustWork = FALSE)
+input_file <- normalizePath(input_file, winslash = "/", mustWork = FALSE)
+output_file <- normalizePath(output_file, winslash = "/", mustWork = FALSE)
+
+# Build command safely
+cmd <- paste(
+  "java -jar", shQuote(jar_path), " classify ",
+  "--in", shQuote(input_file),
+  "--format hsd",
+  "--phylotree", phylotreeVersion,
+  "--out", shQuote(output_file)
+)
+
+# Run the command
+system(cmd)
+message("HaploGrep2 classify run")
+
+# Read output if it exists
+if (file.exists(output_file)) {
+  haplogroups <- read.delim(output_file, sep = "\t", header = TRUE)
+  haplogroupsList<-haplogroups %>%
+    select(SampleID, Haplogroup)
+}
+
+  colnames(haplogroupsList) <- as.character(c("hg1", "hg2"))
+  write.table(haplogroupsList, file = haplogroup_distcheck_file , sep = ";", row.names = FALSE, col.names = TRUE, quote = FALSE)
+  
+
+   
+# Build command safely
+cmd <- paste(
+  "java -jar", shQuote(jar_path), " distance ",
+  "--in", shQuote(haplogroup_distcheck_file),
+  "--out", shQuote(haplogroup_distcheck_result_file)
+)
+
+# Run the command
+system(cmd)
+message("HaploGrep2 classify run")
+
+
+
+# ==============================================================================
+# Step 5: Haplogrep distance Analysis
+# ==============================================================================
+
+
+# Read output if it exists
+if (file.exists(haplogroup_distcheck_result_file)) {
+  haplogroupsDiff <- read.delim(haplogroup_distcheck_result_file, sep = ";", header = TRUE)
+  #knitr::kable(haplogroupsDiff)
+  }
+
+
+haplogroupsDiff$hg1_Hgsubgroup<-str_extract(haplogroupsDiff$hg1, "[A-z]{1,4}+\\d*")
+haplogroupsDiff$hg1_oneletter<-str_extract(haplogroupsDiff$hg1, "[A-z]*")
+
+haplogroupsDiff$hg2_Hgsubgroup<-str_extract(haplogroupsDiff$hg2, "[A-z]{1,4}+\\d*")
+haplogroupsDiff$hg2_oneletter<-str_extract(haplogroupsDiff$hg2, "[A-z]*")
+
+haplogroupsDiff<-get_Supergroups(haplogroupsDiff)
+
+
+sorted_haplogroups_diff <- haplogroupsDiff %>%
+  arrange(desc(distance))
+
+  #knitr::kable(head(sorted_haplogroups_diff, n = 10)) # Display top 10 rows (adjust 'n' as desired)
+
+
+
+# Prepare data: Count flows between hg1 and hg2 MacroPhylo, handling NAs
+plot_data_prep <- haplogroupsDiff %>%
+  mutate(
+    # Replace NAs with "Unknown" for plotting
+    MacroPhylo_hg1 = ifelse(is.na(hg1_MacroPhylo), "Unknown", hg1_MacroPhylo),
+    MacroPhylo_hg2 = ifelse(is.na(hg2_MacroPhylo), "Unknown", hg2_MacroPhylo)
+  ) %>%
+  # Count the occurrences of each unique flow
+  group_by(MacroPhylo_hg1, MacroPhylo_hg2) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  ungroup()
+
+#print(head(plot_data_prep))
+
+# 1. Create distinct names for source and target nodes by prefixing
+source_node_names_prefixed <- paste0("HG1: ", unique(plot_data_prep$MacroPhylo_hg1))
+target_node_names_prefixed <- paste0("HG2: ", unique(plot_data_prep$MacroPhylo_hg2))
+
+# 2. Combine all unique prefixed names to create the full list of nodes
+all_node_names <- unique(c(source_node_names_prefixed, target_node_names_prefixed))
+
+# 3. Create the nodes dataframe with 0-indexed IDs and original group for coloring
+nodes_df <- data.frame(
+  name = all_node_names,
+  group = stringr::str_remove(all_node_names, "^HG[12]: ") # Extract original group for coloring
+)
+nodes_df$id <- 0:(nrow(nodes_df) - 1) # networkD3 requires 0-indexed IDs
+
+# 4. Create the links dataframe using the prefixed names and their IDs
+links_df <- plot_data_prep %>%
+  # Map MacroPhylo_hg1 to its prefixed name
+  mutate(Source_Prefixed = paste0("HG1: ", MacroPhylo_hg1),
+         Target_Prefixed = paste0("HG2: ", MacroPhylo_hg2)) %>%
+  # Join with nodes_df to get the 0-indexed IDs
+  left_join(nodes_df, by = c("Source_Prefixed" = "name")) %>%
+  rename(source_id = id) %>%
+  left_join(nodes_df, by = c("Target_Prefixed" = "name")) %>%
+  rename(target_id = id) %>%
+  # Select the required columns for networkD3
+  select(source = source_id, target = target_id, value = Count)
+
+# Ensure no NAs in source or target IDs
+if (any(is.na(links_df$source)) || any(is.na(links_df$target))) {
+  warning("NA values found in source or target IDs after mapping. Check data preparation.")
+  links_df <- links_df %>% filter(!is.na(source), !is.na(target))
+}
+
+# 5. Create the Sankey plot
+sankeyNetwork(Links = links_df, Nodes = nodes_df,
+              Source = "source", Target = "target",
+              Value = "value", NodeID = "name",
+              NodeGroup = "group", # Use the 'group' column for coloring
+              units = "samples", fontSize = 12, nodeWidth = 30,
+              colourScale = JS('d3.scaleOrdinal(d3.schemeCategory10);')) # Use a D3 color scheme
+
+
+```
+
+```{r,  warning=FALSE, echo=FALSE }
+
+
+# Run the function for GSA-v3
+gsa_results <- process_haplogroup_data(
+  array_type = "GSA-24v3-0_A1",
+  array_file_path = array_gsa_file,
+  haplogrep_input_file = haplogrep_input_file,
+  output_base_name = "gsa_output"
+)
+
+
+# Run the function for GSA-v4
+#gsa4_results <- process_haplogroup_data(
+#  array_type = "GSA-PGx-48v4",
+#  array_file_path = array_gsa_file,
+#  haplogrep_input_file = haplogrep_input_file,
+#  output_base_name = "gsa4_output"
+#)
+
+
+
+# Run the function for Omni
+omni_results <- process_haplogroup_data(
+  array_type = "InfiniumOmni2-5-8v1-5_A1",
+  array_file_path = array_omni_file,
+  haplogrep_input_file = haplogrep_input_file,
+  output_base_name = "omni_output"
+)
+
+# Run the function for Mega
+
+mega_results <- process_haplogroup_data(
+  array_type = "Multi-EthnicGlobal_D",
+  array_file_path = array_mega_file,
+  haplogrep_input_file = haplogrep_input_file,
+  output_base_name = "mega_output"
+)
+
+#mega_A1_results <- process_haplogroup_data(
+#  array_type = "Multi-EthnicGlobal_A1",
+#  array_file_path = array_mega_A1_file,
+#  haplogrep_input_file = haplogrep_input_file,
+#  output_base_name = "mega_A1_output"
+#)
+
+#mega_D1_results <- process_haplogroup_data(
+#  array_type = "Multi-EthnicGlobal_D1",
+#  array_file_path = array_mega_D1_file,
+#  haplogrep_input_file = haplogrep_input_file,
+#  output_base_name = "mega_D1_output"
+#)
+
+
+axiom_ukb_results <- process_haplogroup_data(
+  array_type = "Axiom UKB",
+  array_file_path = array_axiom_ukb_file,
+  haplogrep_input_file = haplogrep_input_file,
+  output_base_name = "axiom_ukb_output"
+)
+
+
+
+# Initialize an empty list to store distance data
+all_distances_list <- list()
+
+# Add GSA data if available
+if (!is.null(gsa_results) && !is.null(gsa_results$haplogroupsDiff)) {
+  gsa_distances <- gsa_results$haplogroupsDiff %>%
+    mutate(ArrayType = "GSA-24v3-0_A1") %>%
+    select(ArrayType, distance) # Select only ArrayType and the Distance column
+  all_distances_list[[length(all_distances_list) + 1]] <- gsa_distances
+}
+
+# Add GSA4 data if available
+#if (!is.null(gsa4_results) && !is.null(gsa4_results$haplogroupsDiff)) {
+#  gsa4_distances <- gsa4_results$haplogroupsDiff %>%
+#    mutate(ArrayType = "GSA-PGx-48v4") %>%
+#    select(ArrayType, distance) # Select only ArrayType and the Distance column
+#  all_distances_list[[length(all_distances_list) + 1]] <- gsa4_distances
+#}
+
+
+# Add Omni data if available
+if (!is.null(omni_results) && !is.null(omni_results$haplogroupsDiff)) {
+  omni_distances <- omni_results$haplogroupsDiff %>%
+    mutate(ArrayType = "InfiniumOmni2-5-8v1-5_A1") %>%
+    select(ArrayType, distance)
+  all_distances_list[[length(all_distances_list) + 1]] <- omni_distances
+}
+
+# Add Mega data if available
+if (!is.null(mega_results) && !is.null(mega_results$haplogroupsDiff)) {
+  mega_distances <- mega_results$haplogroupsDiff %>%
+    mutate(ArrayType = "Multi-EthnicGlobal_D") %>%
+    select(ArrayType, distance)
+  all_distances_list[[length(all_distances_list) + 1]] <- mega_distances
+}
+
+# Add Mega A1 strand file from Rayner data if available
+#if (!is.null(mega_A1_results) && !is.null(mega_A1_results$haplogroupsDiff)) {
+#  mega_A1_distances <- mega_A1_results$haplogroupsDiff %>%
+#    mutate(ArrayType = "Multi-EthnicGlobal_A1") %>%
+#    select(ArrayType, distance)
+#  all_distances_list[[length(all_distances_list) + 1]] <- mega_A1_distances
+#}
+
+# Add Mega D1 strand file from Rayner data if available
+#if (!is.null(mega_D1_results) && !is.null(mega_D1_results$haplogroupsDiff)) {
+#  mega_D1_distances <- mega_D1_results$haplogroupsDiff %>%
+#    mutate(ArrayType = "Multi-EthnicGlobal_D1") %>%
+#    select(ArrayType, distance)
+#  all_distances_list[[length(all_distances_list) + 1]] <- mega_D1_distances
+#}
+
+
+# Add Axiom UKB data if available
+if (!is.null(axiom_ukb_results) && !is.null(axiom_ukb_results$haplogroupsDiff)) {
+  axiom_ukb_distances <- axiom_ukb_results$haplogroupsDiff %>%
+    mutate(ArrayType = "Axiom-UKB") %>%
+    select(ArrayType, distance)
+  all_distances_list[[length(all_distances_list) + 1]] <- axiom_ukb_distances
+}
+
+
+
+# Combine all into a single data frame
+combined_distances_df <- bind_rows(all_distances_list)
+
+haplogroupsDiff$ArrayType="VCF"
+diffVCF<-haplogroupsDiff %>%
+  select(ArrayType, distance)
+
+ 
+combined<-rbind(combined_distances_df, diffVCF)
+
+
+if (!is.null(combined) && nrow(combined) > 0) {
+  ggplot(combined, aes(x = ArrayType, y = distance, fill = ArrayType)) +
+    geom_violin(trim = FALSE, alpha = 0.7) + # trim=FALSE ensures tails extend to min/max
+    labs(
+      title = "Comparison of Haplogroup Distances by Array Type",
+      subtitle = "Violin Plot with Jittered Data Points",
+      x = "Array Type",
+      y = "Haplogroup Distance"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none") # Remove legend if fill is only for X-axis
+} else {
+  cat("No distance data available for comparison.")
+}
+
+counted <- combined %>%
+  group_by(ArrayType, distance) %>%
+  summarise(count = n(), .groups = 'drop')
+
+
+
+ggplot(combined, aes(x = distance, color = ArrayType)) +
+  stat_ecdf(aes(linetype = (ArrayType == "VCF")), geom = "line", linewidth = 1) + 
+  stat_ecdf(geom = "point", size = 1) +
+  scale_x_continuous(breaks = 0:25) +
+  scale_linetype_manual(values = c("TRUE" = "dashed", "FALSE" = "solid")) +
+  guides(linetype = "none") + 
+  theme_minimal(base_size = 12) +  coord_cartesian(xlim = c(1, max(combined$distance, na.rm = TRUE)))
+```
+
+
+## Haplogroup Differences Table (GSA)
+
+```{r gsa-table, echo=FALSE, results='asis'}
+if (!is.null(gsa_results) && !is.null(gsa_results$haplogroupsDiff)) {
+   sorted_haplogroups_diff <- gsa_results$haplogroupsDiff %>%
+   arrange(desc(distance))
+
+ # knitr::kable(head(sorted_haplogroups_diff, n = 10)) # Display top 10 rows (adjust 'n' as desired)
+
+} else {
+  cat("No haplogroup difference data available for GSA.")
+}
+
+if (!is.null(gsa_results) && !is.null(gsa_results$sankey_plot)) {
+  gsa_results$sankey_plot
+} else {
+  cat("No Sankey plot available for GSA.")
+}
+```
+
+## Omni Haplogroup Analysis
+
+### Haplogroup Differences Table (Omni)
+```{r omni-table, echo=FALSE, results='asis'}
+if (!is.null(omni_results) && !is.null(omni_results$haplogroupsDiff)) {
+    sorted_haplogroups_diff <- omni_results$haplogroupsDiff %>%
+    arrange(desc(distance))
+
+  #knitr::kable(head(sorted_haplogroups_diff, n = 10)) # Display top 10 rows (adjust 'n' as desired)
+
+} else {
+  cat("No haplogroup difference data available for Omni.")
+}
+
+if (!is.null(omni_results) && !is.null(omni_results$sankey_plot)) {
+  omni_results$sankey_plot
+} else {
+  cat("No Sankey plot available for Omni.")
+}
+
+
+
+```
+
+## Mega Haplogroup Analysis
+
+### Haplogroup Differences Table (Mega)
+```{r mega-table, echo=FALSE, results='asis'}
+if (!is.null(mega_results) && !is.null(mega_results$haplogroupsDiff)) {
+    sorted_haplogroups_diff <- mega_results$haplogroupsDiff %>%
+    arrange(desc(distance))
+
+  #knitr::kable(head(sorted_haplogroups_diff, n = 10)) # Display top 10 rows (adjust 'n' as desired)
+
+} else {
+  cat("No haplogroup difference data available for Mega.")
+}
+
+if (!is.null(mega_results) && !is.null(mega_results$sankey_plot)) {
+  mega_results$sankey_plot
+} else {
+  cat("No Sankey plot available for Mega.")
+}
+
+```
+
+## Axiom UKB Haplogroup Analysis
+
+### Haplogroup Differences Table (Axiom UKB)
+```{r axiom-ukb-table, echo=FALSE, results='asis'}
+if (!is.null(axiom_ukb_results) && !is.null(axiom_ukb_results$haplogroupsDiff)) {
+    sorted_haplogroups_diff <- axiom_ukb_results$haplogroupsDiff %>%
+    arrange(desc(distance))
+
+ # knitr::kable(head(sorted_haplogroups_diff, n = 10)) # Display top 10 rows (adjust 'n' as desired)
+
+} else {
+  cat("No haplogroup difference data available for Omni.")
+}
+
+if (!is.null(axiom_ukb_results) && !is.null(axiom_ukb_results$sankey_plot)) {
+  axiom_ukb_results$sankey_plot
+} else {
+  cat("No Sankey plot available for Omni.")
+}
+
+
+
+```
+
+
+# Compare Macro - Haplogroups
+
+### Prepare Data for MacroPhylo Comparison
+```{r combine-macrophylos-for-plot, echo=FALSE}
+# Initialize an empty list to store MacroPhylo data
+all_macrophylos_list <- list()
+
+# Function to safely extract and label MacroPhylo data
+extract_macrophylos <- function(results_object, array_label) {
+  if (!is.null(results_object) && !is.null(results_object$haplogroupsDiff)) {
+    df <- results_object$haplogroupsDiff %>%
+      mutate(
+        ArrayType = array_label,
+        # Convert NA MacroPhylo values to "Unknown" for consistent plotting
+        hg2_MacroPhylo_Clean = ifelse(is.na(hg2_MacroPhylo), "Unknown", hg2_MacroPhylo)
+      ) %>%
+      select(ArrayType, hg2_MacroPhylo_Clean)
+    return(df)
+  } else {
+    return(NULL)
+  }
+}
+
+# Add GSA data
+all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- extract_macrophylos(gsa_results, "GSA")
+
+# Add GSA4 data
+#all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- #extract_macrophylos(gsa4_results, "GSA4")
+
+# Add Omni data
+all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- extract_macrophylos(omni_results, "Omni")
+
+# Add Mega data
+all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- extract_macrophylos(mega_results, "Mega")
+
+# Add Axiom UKB data
+all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- extract_macrophylos(axiom_ukb_results, "Axiom UKB")
+
+
+# -------------------------------------------------------------
+# ADDITION: Incorporate additional dataframe's MacroPhylo data
+# -------------------------------------------------------------
+
+# --- Configuration for additional dataframe (same as before) ---
+my_additional_dataframe_name <- "haplogroupsDiff" 
+
+column_with_macrophylos_in_additional_df <- "hg2_MacroPhylo" # REPLACE if your column is different
+new_label_for_additional_data <- "VCF" # REPLACE with your label
+
+if (exists(my_additional_dataframe_name) && is.data.frame(get(my_additional_dataframe_name))) {
+  temp_additional_df <- get(my_additional_dataframe_name)
+
+  if (column_with_macrophylos_in_additional_df %in% colnames(temp_additional_df)) {
+    additional_macrophylos_data <- temp_additional_df %>%
+      mutate(
+        ArrayType = new_label_for_additional_data,
+        hg2_MacroPhylo_Clean = ifelse(is.na(!!sym(column_with_macrophylos_in_additional_df)), "Unknown", !!sym(column_with_macrophylos_in_additional_df))
+      ) %>%
+      select(ArrayType, hg2_MacroPhylo_Clean)
+
+    all_macrophylos_list[[length(all_macrophylos_list) + 1]] <- additional_macrophylos_data
+    message(paste("Successfully added MacroPhylo data from '", my_additional_dataframe_name, "' with label '", new_label_for_additional_data, "'", sep=""))
+
+  } else {
+    warning(paste("MacroPhylo column '", column_with_macrophylos_in_additional_df, "' not found in dataframe '", my_additional_dataframe_name, "'. Skipping addition of MacroPhylo data.", sep=""))
+  }
+} else {
+  warning(paste("Dataframe '", my_additional_dataframe_name, "' not found for MacroPhylo comparison. Skipping addition.", sep=""))
+}
+
+# -------------------------------------------------------------
+# End of Addition
+# -------------------------------------------------------------
+
+expected <- haplogroupsDiff %>%
+  transmute(
+    ArrayType = "Expected",
+    hg2_MacroPhylo_Clean = ifelse(is.na(hg1_MacroPhylo), "Unknown", hg1_MacroPhylo)
+  )
+
+
+expected_df <- expected %>%
+  group_by(ArrayType, hg2_MacroPhylo_Clean) %>%
+  summarise(Count=n()) %>%
+  mutate(Expected_Count = Count) %>%
+  select(hg2_MacroPhylo_Clean, Expected_Count)
+
+
+combined_macrophylos_df <- bind_rows(all_macrophylos_list[!sapply(all_macrophylos_list, is.null)])
+
+
+# Optional: Set factor levels for ArrayType and hg2_MacroPhylo_Clean for consistent plotting order
+if (!is.null(combined_macrophylos_df) && nrow(combined_macrophylos_df) > 0) {
+  # Order ArrayTypes (e.g., GSA, Omni, Mega, External)
+  combined_macrophylos_df$ArrayType <- factor(
+    combined_macrophylos_df$ArrayType,
+    levels = c("GSA", "Omni", "Mega", "Axiom UKB", new_label_for_additional_data, "Expected")
+  )
+}
+
+```
+
+### Comparison of MacroPhylo Distributions
+
+```{r, echo=FALSE, out.width="80%"}
+if (!is.null(combined_macrophylos_df) && nrow(combined_macrophylos_df) > 0) {
+  # Calculate proportions for plotting
+  plot_data_macrophylos <- combined_macrophylos_df %>%
+    group_by(ArrayType, hg2_MacroPhylo_Clean) %>%
+    summarise(Count = n(), .groups = 'drop_last') %>%
+    mutate(Proportion = Count / sum(Count)) %>%
+    ungroup()
+  
+  
+  combined_df <- plot_data_macrophylos %>%
+  left_join(expected_df, by = "hg2_MacroPhylo_Clean") %>%
+  rename(Observed_Count = Count) %>%
+  tidyr::pivot_longer(
+    cols = c("Observed_Count", "Expected_Count"),
+    names_to = "Type",
+    values_to = "Count"
+  )
+  
+combined_df$Type <- recode(combined_df$Type,
+                        "Observed_Count" = "Observed",
+                        "Expected_Count" = "Expected")
+
+combined_df <- combined_df %>%
+  rename(ArrayType = ArrayType.x) %>%
+  select(-ArrayType.y)  
+
+
+p1<-ggplot(combined_df, aes(x = hg2_MacroPhylo_Clean, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  facet_wrap(~ ArrayType, scales = "free_y", ncol=1) +
+  scale_fill_manual(values = c("Observed" = "#1f77b4", "Expected" = "grey70")) +
+  labs(
+    title = "Observed vs Expected Counts of Macro-Haplogroups per ArrayType",
+    x = "Macro Haplogroup",
+    y = "Count",
+    fill = "Type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )  + theme(legend.position="bottom") 
+
+  print(p1)
+
+ggplot(plot_data_macrophylos, aes(x = hg2_MacroPhylo_Clean, y = Proportion, fill = hg2_MacroPhylo_Clean)) + # X is now MacroPhylo, fill by MacroPhylo
+    geom_col(width = 0.8) +
+    facet_wrap(~ ArrayType,     # Facet by ArrayType (your methods)
+               ncol = 1,     # Let ggplot decide number of columns/rows, or set a specific number (e.g., ncol = 2)
+               scales = "free_y" # Allow y-axis to vary for each facet, as proportions might differ greatly between methods
+    ) +
+    labs(
+      title = "Distribution of Macro Haplogroups per MicroArray Positions",
+      x = "Macro Haplogroup",
+      y = "Proportion",
+      fill = "Macro Haplogroup" # Legend title
+    ) +
+    scale_y_continuous(labels = scales::percent) + # Format y-axis as percentage
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels (Macro Haplogroup names)
+      strip.background = element_rect(fill = "grey90", color = "grey90"), # Background for facet labels
+      strip.text = element_text(face = "bold") # Bold facet labels
+    )  + theme(legend.position="none") 
+  
+} else {
+  cat("No Macro Haplogroup data available for comparison.")
+}
+
+```

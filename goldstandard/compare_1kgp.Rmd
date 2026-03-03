@@ -47,7 +47,7 @@ merged_kg_pan_low <- inner_join(kg_pan, kg_callmom, by = "SampleID", suffix = c(
 
 merged_kg_freebayes <- inner_join(kg_samtools, kg_freebayes, by = "SampleID", suffix = c(".samtools", ".freebayes"))
 
-ggplot(merged_kg_deep, aes(x=Quality.deep, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.deep==Haplogroup.freebayes), alpha=0.5) +   theme(legend.position="bottom") + ggtitle("1000G Deep Byrska-Bishop et al vs. Freebayes")
+ggplot(merged_kg_deep, aes(x=Quality.deep, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.deep==Haplogroup.freebayes), alpha=0.5) +   theme(legend.position="bottom") + ggtitle("1000G Deep Byrska-Bishop et al vs. Freebayes") +  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", size = 1) + ylim(0.5, 1) + xlim(0.5,1)  
 
 ggplot(merged_kg_low,  aes(x=Quality.low, y=Quality.freebayes)) + geom_point(aes(color=Haplogroup.low==Haplogroup.freebayes), alpha=0.5) +theme(legend.position="bottom") + ggtitle("1000G Phase 3 Low-coverage vs. Freebayes")
 
