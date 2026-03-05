@@ -128,9 +128,12 @@ write.table(SNPids_df, file="output/snpIDs.txt", row.names = FALSE, sep="\t")
 
 merged_data$Position<-as.numeric(merged_data$Position)
 
+
+
+
 combined_df <- bind_rows(
-  merged_data %>% select(Microarray_ID, Position),
-  axiom_data %>% select(Microarray_ID = V1, Position = V7)
+  merged_data %>% select(Microarray_ID, Position, Strand, Allele),
+  axiom_data %>% mutate(Allele = paste(V13, V14, sep = "")) %>% select(Microarray_ID = V1, Position = V7, Strand=V9, Allele)
 )
 
 
@@ -143,11 +146,16 @@ combined_df <- combined_df %>%
   mutate(Microarray_ID = str_remove(Microarray_ID, "Illmn.strand")) %>%
   mutate(Microarray_ID = str_remove(Microarray_ID, "SOURCE.strand")) %>%
   mutate(Microarray_ID = str_remove(Microarray_ID, ".annot")) %>%
-  mutate(Microarray_ID = str_remove(Microarray_ID, "b37")) %>%
+  mutate(Microarray_ID = str_remove(Microarray_ID, "b37"))
+
+write.table(combined_df, "combined_arrays.txt", row.names = FALSE, sep="\t")
+
+combined_df <- combined_df %>%
   group_by(Microarray_ID) %>%
   mutate(n_snps = n_distinct(Position)) %>%
   ungroup() %>%
   mutate(id_label = paste0(Microarray_ID, " (", n_snps, ")"))
+
 
 
 haplogrep_annotation <- haplogrep_annotation %>%
