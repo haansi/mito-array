@@ -14,6 +14,15 @@ library(proxy)
 library(cluster)  
 library(factoextra)
 library(ggpubr)
+
+options(warn = -1)
+library(purrr)
+library(furrr)
+library(progressr)
+library(kableExtra)
+library(plotly)
+options(warn = 0)
+
 ```
 
 ## Cenotying arrays - Overview
@@ -85,7 +94,7 @@ plot <- ggplot(all_counts, aes(x = reorder(Microarray_ID, Variant_Count), y = Va
   coord_flip() + # Flip the coordinates for readability
   theme(legend.position = "bottom")
 
-print(plot)
+#print(plot)
 
 # Save the plot with adjusted dimensions
 ggsave("output/combined_variant_counts_report.png", plot, width = 12, height = 20, units = "in")
@@ -276,6 +285,202 @@ snp_refAlt_neg_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="-",], by.x="SNP
 
 
 ```
+
+# Compare major arrays for haplogroup metrics
+
+```{r, echo=FALSE, warnings=FALSE, message=FALSE}
+
+
+source("../../scripts/haplogroup_processing_dataframe.R")
+
+.options = furrr_options(
+  globals = c("process_haplogroup_data", "hsd_path_abs"),
+  packages = c("dplyr", "stringr", "networkD3", "htmlwidgets")
+)
+
+#args(process_haplogroup_data)
+#readLines("../../scripts/haplogroup_processing.R", n = 100)
+
+##test-scenarios######################################################
+#hsd_path_abs <- normalizePath("data/test10AFR.hsd", mustWork = TRUE)
+#hsd_path_abs <- normalizePath("data/test193AFR.hsd", mustWork = TRUE)
+#hsd_data <- read.delim(hsd_path_abs)
+#hsd_data[[3]] <- ""
+#hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+
+
+csv_path_abs <- normalizePath("../../reference/output/ref_AFR.csv", mustWork = TRUE)
+csv_data <- read.delim(csv_path_abs, sep=",")
+csv_data[[3]] <- ""
+hsd_data <- csv_data[,1:4]
+hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+hsd_data <- hsd_data[hsd_data$SampleID != "mt-MRCA", ]
+
+
+#plan(sequential)
+#closeAllConnections()
+
+groups <- combined_df %>%
+  group_split(Microarray_ID)
+
+group_ids <- combined_df %>%
+  distinct(Microarray_ID) %>%
+  pull()
+
+names(groups) <- group_ids
+
+test_groups <- groups
+
+#for subsetting
+#test_groups <- groups[1:20]
+
+
+
+plan(multisession, workers = parallel::detectCores() - 1)
+
+handlers("progress")
+
+with_progress({
+  haplogroupsDiff_all <- future_map_dfr(
+    test_groups,
+    function(df_group) {
+      current_id <- unique(df_group$Microarray_ID)
+      process_haplogroup_data(
+        array_type = current_id,
+        array_df = df_group,
+        hsd_data = hsd_data,  
+        output_base_name = paste0("out_", current_id)
+      )
+    },
+    .options = furrr_options(
+      globals = c(
+        "process_haplogroup_data",
+        "hsd_data",
+        "phylotreeVersion",
+        "get_Supergroups",
+        ".derive_MacroPhylo"
+      ),
+      packages = c("dplyr", "stringr", "networkD3", "htmlwidgets")
+    ),
+    .progress = TRUE
+  )
+})
+
+ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType)) +
+  stat_ecdf(geom = "line", lwd = 1) +
+  scale_x_continuous(breaks = seq(0, 25, by = 5)) + # Simplified breaks for small plots
+  facet_wrap(~ArrayType, ncol = 4) + # Organizes into a grid
+  labs(
+    title = "Cumulative Distribution by Array Type",
+    x = "Observed Haplogroup distance",
+    y = "Cumulative Proportion"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none", # Legend is redundant with facet titles
+        strip.text = element_text(size = 8, face = "bold")) # Clean up facet labels
+
+
+ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType)) +
+  stat_ecdf(geom = "line", lwd=1) + stat_ecdf(geom = "point", size = 1) +
+  scale_x_continuous(breaks = 0:25) +
+  labs(
+    title = "Cumulative Distribution of Values Across Datasets",
+    subtitle = paste("Distances on haplogroups (n=",nrow(hsd_data),") of expected vs. predicted Haplogroups"),
+    x = "Observed Haplogroup distance",
+    y = "Cumulative Proportion",
+    color = "MicroArray"
+  ) +
+  theme_minimal(base_size = 12) +  coord_cartesian(xlim = c(1, max(haplogroupsDiff_all$distance, na.rm = TRUE))) + theme(legend.position = "right")
+
+
+#######################################
+
+# 1. Rank your ArrayTypes by performance (e.g., Median distance)
+ranking <- haplogroupsDiff_all %>%
+  group_by(ArrayType) %>%
+  summarize(med = median(distance, na.rm = TRUE)) %>%
+  arrange(med)
+
+top_5 <- head(ranking$ArrayType, 5)
+bottom_5 <- tail(ranking$ArrayType, 5)
+keep_in_legend <- c(top_5, bottom_5)
+
+# 2. Add a 'ShowInLegend' flag and 'CustomColor' to your data
+haplogroupsDiff_all <- haplogroupsDiff_all %>%
+  mutate(
+    Group = ifelse(ArrayType %in% keep_in_legend, as.character(ArrayType), "Other"),
+    InLegend = ArrayType %in% keep_in_legend
+  )
+
+# 3. Build the Plot
+p <- ggplot(haplogroupsDiff_all, aes(x = distance, color = Group, group = ArrayType)) +
+  # Use 'text' aesthetic to customize the mouse-over tooltip
+  stat_ecdf(geom = "line", aes(text = paste("Array:", ArrayType)), lwd = 0.8) +
+  scale_color_manual(values = c(
+    setNames(scales::hue_pal()(length(keep_in_legend)), keep_in_legend), 
+    "Other" = "grey85"
+  )) +
+  scale_x_continuous(breaks = 0:25) +
+  labs(title = "Interactive Haplogroup Distribution", x = "Distance", y = "Cumulative Prop") +
+  theme_minimal() + theme(legend.position = "bottom")
+
+# 4. Convert to Plotly and fix the legend
+# We hide the legend for 'Other' items to keep it clean
+fig <- ggplotly(p, tooltip = "text") %>%
+  style(showlegend = FALSE, traces = which(unique(haplogroupsDiff_all$Group) == "Other"))
+
+fig
+
+
+
+#######################################
+
+
+
+max_dist <- max(haplogroupsDiff_all$distance)
+dist_range <- 0:max_dist
+num_points <- length(dist_range)
+
+auc_results <- haplogroupsDiff_all %>%
+  group_by(ArrayType) %>%
+  summarise(
+    AUC_Normalized = sum(ecdf(distance)(dist_range)) / num_points,
+    Mean_Distance = mean(distance, na.rm = TRUE),
+    n = n()
+  ) %>%
+  mutate(Tier = case_when(
+    AUC_Normalized >= 0.95 ~ "🥇 Gold (Excellent)",
+    AUC_Normalized >= 0.85 ~ "🥈 Silver (Good)",
+    AUC_Normalized >= 0.75 ~ "🥉 Bronze (Fair)",
+    TRUE                   ~ "⚠️ Low Performance"
+  )) %>%
+  arrange(desc(AUC_Normalized))
+
+# Update names for the Sankey section
+best_array_name  <- auc_results$ArrayType[1]
+worst_array_name <- auc_results$ArrayType[nrow(auc_results)]
+
+
+kable(auc_results, 
+      col.names = c("Microarray", "Normalized AUC", "Mean Distance", "Sample Size", "Performance Tier"),
+      digits = 3,
+      caption = "Microarray Performance Ranking with Tiers")
+
+ggplot(auc_results, aes(x = reorder(ArrayType, AUC_Normalized), y = AUC_Normalized, fill = Tier)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("🥇 Gold (Excellent)" = "#FFD700", 
+                               "🥈 Silver (Good)" = "#C0C0C0", 
+                               "🥉 Bronze (Fair)" = "#CD7F32", 
+                               "⚠️ Low Performance" = "#E57373")) +
+  labs(title = "Microarray Accuracy Scores (AUC Normalized)",
+       x = "Microarray Type",
+       y = "Accuracy Score (0-1)",
+       fill = "Tier") +
+  theme_minimal()
+
+```
+
 
 ## Prominent microarrays 
 
