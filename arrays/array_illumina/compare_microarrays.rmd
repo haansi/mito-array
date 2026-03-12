@@ -21,6 +21,7 @@ library(furrr)
 library(progressr)
 library(kableExtra)
 library(plotly)
+library(ggridges)
 options(warn = 0)
 
 ```
@@ -244,6 +245,123 @@ ggsave("output/dendrogram_jaccard.pdf", p, width = 18, height = 12)
 ggsave("output/dendrogram_simple_matching.pdf", p2, width = 18, height = 12)
 
 
+##### FILTER for identical groups:
+
+# 1. Convert to data frame to use dplyr's distinct()
+
+binary_df <- binary_matrix
+binary_df$ArrayType <- rownames(binary_matrix)
+
+
+# 2. Keep only one representative for each unique pattern of 1s and 0s
+unique_binary_df <- binary_df %>%
+  distinct(across(-ArrayType), .keep_all = TRUE)
+
+# 3. Set row names back to the ArrayType and remove the helper column
+rownames(unique_binary_df) <- unique_binary_df$ArrayType
+unique_matrix_final <- as.matrix(unique_binary_df %>% select(-ArrayType))
+
+cat("Original microarrays:", nrow(binary_matrix), "\n")
+cat("Unique fingerprints:", nrow(unique_matrix_final), "\n")
+
+# Calculate Jaccard distance for the unique set
+jac_dist_unique <- proxy::dist(unique_matrix_final, method = "Jaccard")
+
+# Re-run the silhouette analysis
+# This plot will show you a "peak" at the ideal number of clusters
+fviz_nbclust(unique_matrix_final, hcut, 
+             method = "silhouette", 
+             hc_method = "ward.D2") +
+  labs(title = "Optimal Number of Clusters (Unique Fingerprints Only)")
+
+
+# Run hierarchical clustering
+hc_unique <- hclust(jac_dist_unique, method = "ward.D2")
+
+p_unique<-fviz_dend(hc_unique, k = 10, 
+          cex = 0.5, # Size of the labels
+          k_colors = "jco", 
+          rect = TRUE, # Add rectangles around clusters
+          rect_fill = TRUE,
+          main = "Hierarchical Clustering (k=10)")
+
+plot(p_unique)
+
+
+
+# Cut the tree into your chosen number of clusters (e.g., 10)
+k_choice <- 10 
+unique_clusters <- cutree(hc_unique, k = k_choice)
+
+# Create a mapping of the unique clusters
+unique_cluster_df <- data.frame(
+  ArrayType = names(unique_clusters),
+  ClusterID = as.factor(unique_clusters)
+)
+
+# These are your 10 most distinct representatives
+representative_10 <- unique_cluster_df %>%
+  group_by(ClusterID) %>%
+  slice(1) %>%
+  pull(ArrayType)
+
+print(representative_10)
+
+
+#### Select 10 representative arrays:
+
+# Cut the tree into 10 clusters
+clusters <- cutree(hc, k = 10)
+
+# Create a clean data frame of the results
+cluster_assignment <- data.frame(
+  Microarray = names(clusters),
+  ClusterID = as.factor(clusters)
+)
+
+# See the names in Cluster 1, for example:
+subset(cluster_assignment, ClusterID == 1)
+
+# Or get a list of names grouped by cluster
+split(cluster_assignment$Microarray, cluster_assignment$ClusterID)
+
+representative_samples <- cluster_assignment %>%
+  group_by(ClusterID) %>%
+  slice(1) %>% # This picks the first microarray appearing in each cluster
+  pull(Microarray)
+
+print(representative_samples)
+
+
+
+final_representatives <- unique_cluster_df %>%
+  mutate(
+    snp_num = as.numeric(str_extract(ArrayType, "(?<=\\()\\d+(?=\\))")),
+  ) %>%
+  filter(snp_num >= 10) %>% 
+  group_by(ClusterID) %>%
+  # Calculate the mean and identify which row is closest to it
+  mutate(
+    cluster_mean = mean(snp_num, na.rm = TRUE),
+    is_closest_to_mean = abs(snp_num - cluster_mean) == min(abs(snp_num - cluster_mean))
+  ) %>%
+  # Filter for min, max, OR the one closest to the mean
+  filter(snp_num == min(snp_num) | 
+         snp_num == max(snp_num) | 
+         is_closest_to_mean) %>%
+  # Label them accordingly
+  mutate(extreme_label = case_when(
+    snp_num == max(snp_num) ~ "Highest",
+    snp_num == min(snp_num) ~ "Lowest",
+    is_closest_to_mean      ~ "Mean-ish"
+  )) %>%
+  # Handle ties or overlaps (e.g., if the mean is also the max)
+  distinct(ClusterID, extreme_label, .keep_all = TRUE) %>%
+  ungroup()
+
+# Quick check: did we get the right numbers?
+print(select(final_representatives, ArrayType, ClusterID, snp_num, extreme_label))
+
 ```
 
 ## Check RefAlt files
@@ -269,7 +387,6 @@ p<-ggplot(variant_counts, aes(x = num_variants, y = reorder(Filename, num_varian
 
 length(unique(refAlt_df$Filename))
 
-
 snp_refAlt_df<-merge(refAlt_df, SNPids_df, by.x="SNP_ID", by.y="SNP_ID", all.x=TRUE)
 
 snp_refAlt_pos_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="+",], by.x="SNP_ID", by.y="SNP_ID", all.x=TRUE)
@@ -288,10 +405,12 @@ snp_refAlt_neg_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="-",], by.x="SNP
 
 # Compare major arrays for haplogroup metrics
 
-```{r, echo=FALSE, warnings=FALSE, message=FALSE}
+```{r, echo=FALSE, warnings=FALSE, message=FALSE, img.w}
 
 
 source("../../scripts/haplogroup_processing_dataframe.R")
+
+phylotreeVersion <- "17_FU1"
 
 .options = furrr_options(
   globals = c("process_haplogroup_data", "hsd_path_abs"),
@@ -309,10 +428,17 @@ source("../../scripts/haplogroup_processing_dataframe.R")
 #hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
 
 
-csv_path_abs <- normalizePath("../../reference/output/ref_AFR.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_AFR.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_EUR.csv", mustWork = TRUE)
+csv_path_abs <- normalizePath("../../reference/output/ref_AMR.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_EAS.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_SAS.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_ALL.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_Oth.csv", mustWork = TRUE)
 csv_data <- read.delim(csv_path_abs, sep=",")
-csv_data[[3]] <- ""
 hsd_data <- csv_data[,1:4]
+hsd_data$SampleID<-paste(hsd_data$SampleID,"-",hsd_data$Haplogroup, sep="")
+hsd_data[[3]] <- ""
 hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
 hsd_data <- hsd_data[hsd_data$SampleID != "mt-MRCA", ]
 
@@ -320,23 +446,18 @@ hsd_data <- hsd_data[hsd_data$SampleID != "mt-MRCA", ]
 #plan(sequential)
 #closeAllConnections()
 
-groups <- combined_df %>%
-  group_split(Microarray_ID)
+groups <- split(combined_df, combined_df$Microarray_ID)
 
-group_ids <- combined_df %>%
-  distinct(Microarray_ID) %>%
-  pull()
+# Filter based on clustering analysis
+rep_names_full <- trimws(str_remove(final_representatives$ArrayType, "\\s*\\(.*"))
+test_groups <- groups[names(groups) %in% rep_names_full]
 
-names(groups) <- group_ids
-
-test_groups <- groups
-
-#for subsetting
-#test_groups <- groups[1:20]
+#Filter based on unique arrays - basically run over all
+rep_names_unique <- trimws(str_remove(unique_cluster_df$ArrayType,  "\\s*\\(.*"))
+test_groups <- groups[names(groups) %in% rep_names_unique]
 
 
-
-plan(multisession, workers = parallel::detectCores() - 1)
+plan(multisession, workers = parallel::detectCores() - 2)
 
 handlers("progress")
 
@@ -366,31 +487,94 @@ with_progress({
   )
 })
 
-ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType)) +
-  stat_ecdf(geom = "line", lwd = 1) +
-  scale_x_continuous(breaks = seq(0, 25, by = 5)) + # Simplified breaks for small plots
-  facet_wrap(~ArrayType, ncol = 4) + # Organizes into a grid
+p <- ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType, group = ArrayType)) +
+  stat_ecdf(geom = "line") +
+  theme_minimal()
+
+ggplotly(p)
+
+
+ggplot(haplogroupsDiff_all, aes(x = distance, y = ArrayType, fill = ..x..)) +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+  scale_fill_viridis_c(name = "Distance", option = "C") +
+  labs(title = "Distributions of Distances across Genotyping Arrays") +
+  theme_ridges() +
+  theme(axis.text.y = element_text(size = 6)) # Shrink text to fit 150 labels
+
+
+ggplot(haplogroupsDiff_all, aes(x = distance, group = ArrayType)) +
+  # Draw all 150 lines in very light gray
+  stat_ecdf(geom = "line", color = "gray90", size = 0.2) + 
+  # Highlight the global average or a specific group of interest in bold
+  stat_ecdf(data = haplogroupsDiff_all, aes(x = distance, group = 1), 
+            geom = "line", color = "deepskyblue1", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Individual Haplogroup Distance vs. Global Average (Blue)")
+
+
+# 1. Calculate percentiles for each ArrayType
+# We'll look at every 10th percentile plus the 95th and 99th for outlier detection
+heatmap_data <- haplogroupsDiff_all %>%
+  group_by(ArrayType) %>%
+  reframe(
+    percentile = c(seq(0.1, 0.9, by = 0.1), 0.95, 0.99),
+    dist_value = quantile(distance, probs = percentile, na.rm = TRUE)
+  )
+
+# 2. Create the Heatmap
+ggplot(heatmap_data, aes(x = factor(percentile), 
+                         y = reorder(ArrayType, dist_value, FUN = median), 
+                         fill = dist_value)) +
+  geom_tile() +
+  # Using the 'magma' palette which is great for seeing density/intensity
+  scale_fill_viridis_c(option = "magma", name = "Observed\nDistance") +
   labs(
-    title = "Cumulative Distribution by Array Type",
-    x = "Observed Haplogroup distance",
-    y = "Cumulative Proportion"
+    title = "Haplogroup Distance Fingerprints",
+    subtitle = "Groups sorted by median distance",
+    x = "Percentile (0.5 = Median)",
+    y = "Array Type (n=150)"
   ) +
   theme_minimal() +
-  theme(legend.position = "none", # Legend is redundant with facet titles
-        strip.text = element_text(size = 8, face = "bold")) # Clean up facet labels
+  theme(
+    panel.grid = element_blank(),
+    # With 150 rows, the Y-axis text must be very small
+    axis.text.y = element_text(size = 5), 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
 
 
-ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType)) +
-  stat_ecdf(geom = "line", lwd=1) + stat_ecdf(geom = "point", size = 1) +
-  scale_x_continuous(breaks = 0:25) +
+# Calculate means and grab top 20
+top_20 <- haplogroupsDiff_all %>%
+  group_by(ArrayType) %>%
+  summarize(mean_dist = mean(distance, na.rm = TRUE)) %>%
+  slice_max(mean_dist, n = 20)
+
+# Plot with reorder() to break alphabetical sorting
+ggplot(top_20, aes(x = mean_dist, y = reorder(ArrayType, mean_dist))) +
+  geom_col(fill = "firebrick") +
   labs(
-    title = "Cumulative Distribution of Values Across Datasets",
-    subtitle = paste("Distances on haplogroups (n=",nrow(hsd_data),") of expected vs. predicted Haplogroups"),
-    x = "Observed Haplogroup distance",
-    y = "Cumulative Proportion",
-    color = "MicroArray"
+    title = "Worst 20 Array Types by Highest Mean Distance",
+    x = "Mean Observed Distance (lower=better)",
+    y = "Array Type"
   ) +
-  theme_minimal(base_size = 12) +  coord_cartesian(xlim = c(1, max(haplogroupsDiff_all$distance, na.rm = TRUE))) + theme(legend.position = "right")
+  theme_minimal()
+
+
+# Calculate means and grab bottom 20
+bottom_20 <- haplogroupsDiff_all %>%
+  group_by(ArrayType) %>%
+  summarize(mean_dist = mean(distance, na.rm = TRUE)) %>%
+  slice_min(mean_dist, n = 20)
+
+# Plot with reorder() - negative mean_dist sorts it from lowest to highest
+ggplot(bottom_20, aes(x = mean_dist, y = reorder(ArrayType, -mean_dist))) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Best 20 Array Types by Lowest Mean Distance",
+    x = "Mean Observed Distance (lower = better)",
+    y = "Array Type"
+  ) +
+  theme_minimal()
 
 
 #######################################
@@ -431,7 +615,33 @@ fig <- ggplotly(p, tooltip = "text") %>%
 
 fig
 
+######################################
+### LIMIT THE ARRAYS to 10 Clusters 
 
+# Join back to your main distance data
+
+final_representatives <- final_representatives %>%
+  mutate(ArrayType = clean_text <- sub("\\s*\\(.*", "", ArrayType)) 
+
+
+rep_20_plot_data <- haplogroupsDiff_all %>%
+  filter(ArrayType %in% final_representatives$ArrayType) %>%
+  left_join(final_representatives, by = "ArrayType")
+
+ggplot(rep_20_plot_data, aes(x = distance, color = extreme_label, group = ArrayType)) +
+  stat_ecdf(geom = "line", size = 1.1) +
+  facet_wrap(~ClusterID, ncol = 5, labeller = label_both) + 
+  scale_color_manual(values = c("Highest" = "#D55E00", "Lowest" = "#0072B2", "Mean-ish"="#009E73")) +
+  labs(
+    title = "Comparison of Cluster Extremes",
+    subtitle = "Comparing arrays with the largest vs. smallest bracketed ID within each cluster",
+    x = "Observed Haplogroup Distance",
+    y = "Cumulative Proportion",
+    color = "Intra-Cluster Rank"
+  ) +
+  theme_minimal() +
+  theme(strip.background = element_rect(fill = "gray95", color = NA),
+        legend.position = "bottom")
 
 #######################################
 
@@ -482,32 +692,3 @@ ggplot(auc_results, aes(x = reorder(ArrayType, AUC_Normalized), y = AUC_Normaliz
 ```
 
 
-## Prominent microarrays 
-
-A quick overview of important microarrays - to be completed with a more detailed comparison with data of Will Rayner needed. 
-
-| Vendor (platform) | Total markers (published) | Mitochondrial (mtDNA) markers | Source / where to get full list |
-|-----------------|----------------:|----------------------:|-----------------|
-| **Illumina --- Infinium Global Screening Array (GSA-24 v3.0)** | 654,027 total markers (v3 datasheet) | **1,138 mitochondrial markers**. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/infinium-global-screening-array-data-sheet-370-2016-016.pdf "Infinium Global Screening Array-24 v3.0 BeadChip")) | Illumina GSA datasheet; Illumina product page and array **manifest** (downloadable from Illumina support/product page). ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/infinium-global-screening-array-data-sheet-370-2016-016.pdf "Infinium Global Screening Array-24 v3.0 BeadChip")) |
-| **Illumina --- Infinium Global Diversity Array (GDA, GDA-8 / GDA-8 w/PGx)** | \~1.8--1.9M markers (product page / datasheet) | **\~1,346 mitochondrial markers** reported on the GDA datasheet. ([illumina.com](<https://www.illumina.com/products/by-type/microarray-kits/infinium-global-diversity.html?utm_source=chatgpt.com> "Infinium Global Diversity Array-8 Kit | Multiethnic human genotyping")) |
-| **Illumina --- Infinium Omni5-4 (Omni5)** | \~4,327,108 total markers (Omni5 v1.2) | **209 mitochondrial markers** (Omni5 datasheet). ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/datasheet_omni5.pdf "Infinium Omni5-4 v1.2 BeadChip")) | Omni5 datasheet + manifest. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/datasheet_omni5.pdf "Infinium Omni5-4 v1.2 BeadChip")) |
-| **Illumina --- Multi-Ethnic Global Array (MEG-Array)** | \~1.7M (MEGA), up to \>2M (MEGA-EX) markers (datasheet) | **1,349 mitochondrial markers**. ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/multi-ethnic-genotyping-array-data-sheet-370-2016-031.pdf "Multi-Ethnic Genotyping Array (MEGA) Data Sheet")) | Illumina MEGA datasheet ([illumina.com](https://www.illumina.com/content/dam/illumina-marketing/documents/products/datasheets/multi-ethnic-genotyping-array-data-sheet-370-2016-031.pdf "Multi-Ethnic Genotyping Array (MEGA) Data Sheet")); **Direct manifest download:** [MEGA-EX v1.0 manifest CSV](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/multi-ethnic-global-array/infinium-mega-ex-1-0-b2-manifest-file-csv.zip "Illumina MEGA-EX v1.0 Manifest (CSV)") |
-| **Thermo Fisher / Applied Biosystems --- Axiom PangenomiX Array** | \>800,000 markers in GWAS module (total \>900k in whole array designs) | **\>1,100 common mitochondrial variants** (datasheet lists "common mitochondrial DNA variants \>1,100"). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/GSD/Datasheets/axiom_pangenomix_array_datasheet.pdf "Axiom PangenomiX Array")) | Thermo Fisher Axiom PangenomiX datasheet; Thermo Fisher provides array manifests (Axiom annotation files) for download. ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/GSD/Datasheets/axiom_pangenomix_array_datasheet.pdf "Axiom PangenomiX Array")) |
-| **Thermo Fisher / Axiom --- Axiom Genome-Wide PanAFR (Pan-African)** | \~2.2M markers (PanAFR array set) | **\~288 (miRNA-associated + mitochondrial category listed as 288 in the PanAFR datasheet)** --- PanAFR groups miRNA-associated *and* mitochondrial together in the breakdown. (See datasheet table.) ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/axiom_panafr_arrayplate_datasheet.pdf "Data Sheet,Axiom Genome-Wide Pan-African Array Set")) | PanAFR datasheet; full manifest / probe lists available from Thermo Fisher (Axiom annotation downloads). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/axiom_panafr_arrayplate_datasheet.pdf "Data Sheet,Axiom Genome-Wide Pan-African Array Set")) |
-| **Thermo Fisher / Axiom --- UK Biobank Array** | \~823,132 total markers | **265 mitochondrial markers**. ([ukbiobank.ac.uk](https://biobank.ndph.ox.ac.uk/ukb/ukb/docs/ukb_genotyping_qc.pdf "UK Biobank Axiom Array Genotyping and QC Documentation")) | UK Biobank Axiom manifest (Thermo Fisher / UKB documentation) ([ukbiobank.ac.uk](https://biobank.ndph.ox.ac.uk/ukb/ukb/docs/ukb_genotyping_qc.pdf "UK Biobank Axiom Array Genotyping and QC Documentation")); **Direct manifest download:** [UKB Axiom v2 manifest TSV](https://biobank.ctsu.ox.ac.uk/crystal/crystal/docs/UKBiobank_genotyping_manifest_v2.tsv "UK Biobank Axiom v2 Manifest (TSV)") |
-| **Affymetrix / Thermo Fisher --- Genome-Wide Human SNP Array 6.0 (Affy SNP 6.0)** | \~1.8 million features (\~906,600 SNPs + \~946,000 CNV probes) | **\~411 mitochondrial SNPs** (reported in platform comparison literature / platform summaries). ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/genomewide_snp6_datasheet.pdf?utm_source=chatgpt.com "[PDF] Data Sheet - Genome-Wide Human SNP Array 6.0"), [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC8532338/?utm_source=chatgpt.com "The performance of common SNP arrays in assigning African ...")) | Affymetrix SNP 6.0 datasheet and GEO/UCSC annotation pages; probe lists / manifest available from Affymetrix/Thermo Fisher archives. ([assets.thermofisher.com](https://assets.thermofisher.com/TFS-Assets/LSG/brochures/genomewide_snp6_datasheet.pdf?utm_source=chatgpt.com "[PDF] Data Sheet - Genome-Wide Human SNP Array 6.0"), [genome.ucsc.edu](https://www.genome.ucsc.edu/cgi-bin/hgc?c=chr1&db=hg19&g=snpArrayAffy6SV&hgsid=1146697277_MXWmzZJmhfUFgz0PtthStOaIVj0s&i=CN_435170&l=145061905&o=145311523&r=145500787&t=145311549&utm_source=chatgpt.com "hg19 Human: Affymetrix SNP 6.0 Structural Variation (CN_435170)")) |
-| **Agilent --- SurePrint CGH + SNP microarrays (e.g., 2×400K, 4×180K, 1×1M CGH+SNP)** | CGH + SNP probe totals vary by design (examples: 2×400K = 292,097 CGH + 119,091 SNP probes; 1×1M CGH \~963K probes) | **Vendor does not publish a single "mtDNA SNP count" for CGH+SNP products.** Agilent's CGH+SNP product pages list total SNP probe counts and full probe manifests (SureDesign) --- mitochondrial probes may be included in the SNP probe set, but Agilent does not provide a discrete, published mtDNA SNP tally on the main datasheets. ([agilent.com](<https://www.agilent.com/en/product/cgh-cgh-snp-microarray-platform/cgh-cgh-snp-microarrays/human-microarrays/sureprint-g3-cgh-cgh-snp-microarrays-3425562> "SurePrint G3 CGH & CGH+SNP Microarrays | Agilent")) |
-
-## Check some of the files from vendors
-
-Download some of the above microarrays strand files or bed files if available and compare to the Rayner files.
-
-| microarray | date deposited | chrM | link | microarray_ID |
-|---------------|---------------|---------------|---------------|---------------|
-| [Infinium Global Screening Array v3.0. GSA](https://emea.support.illumina.com/downloads/infinium-global-screening-array-v3-0-support-files.html) | Aug 12, 2019 | 1138 | [BED file](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/global-screening-array-24/v3-0/infinium-global-screening-array-24-v3-0-a1-bed.zip) | GSA-24v3-0_A1 |
-| [Infinium Global Diversity Array 8 v1.0. GSD](https://support.illumina.com/array/array_kits/infinium-global-diversity-array.html) | Apr 19, 2021 |  | [BED file](https://emea.support.illumina.com/content/dam/illumina-support/documents/downloads/productfiles/global-diversity-array/infinium-global-diversity-array-8-v1-0_D1.bed) |  |
-
-```{r, warnings=FALSE, message=FALSE }
-
-
-```

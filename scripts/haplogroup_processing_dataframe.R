@@ -118,7 +118,14 @@ process_haplogroup_data <- function(array_type,
   
   # Process classified results
   haplogroups <- read.delim(outputfile_haplogrep, sep = "\t", header = TRUE)
-  haplogroupsList <- haplogroups %>% select(SampleID, Haplogroup)
+  haplogroupsList <- haplogroups %>%
+    mutate(SampleID = if_else(
+      str_detect(SampleID, "-"),    
+      str_split_i(SampleID, "-", 2),  
+      SampleID                             
+    )
+    )  %>%
+    select(SampleID, Haplogroup)
   colnames(haplogroupsList) <- c("hg1", "hg2")
   write.table(haplogroupsList, file = haplogroup_distcheck_file, sep = ";", row.names = FALSE, col.names = TRUE, quote = FALSE)
   

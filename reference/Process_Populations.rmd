@@ -19,23 +19,68 @@ library(stringr)
 Process 1000G (n=2,504), HGDP (n=828) and SGDP (n=279) - Total n=3611
 
 ```{r, warning=TRUE, echo=FALSE}
-allDeep_1000G <- read.delim("data/allDeep_1000G.hsd")
+
+#Run haplogrep2 on all files to use Phylotree 17_FU1
+
+# 1. Setup paths
+hsd_folder <- "data"     
+output_folder <- "data/output_results"   
+jar_path_abs <- "../bin/haplogrep.jar"
+
+if (!dir.exists(output_folder)) dir.create(output_folder)
+
+hsd_files <- list.files(path = hsd_folder, pattern = "\\.hsd$", full.names = TRUE)
+
+for (hsdfile in hsd_files) {
+  
+  file_base <- tools::file_path_sans_ext(basename(hsdfile))
+  outputfile_haplogrep <- file.path(output_folder, paste0(file_base, "_classified.txt"))
+  
+  if (!file.exists(outputfile_haplogrep)) {
+    message("Processing: ", file_base)
+    
+    cmd_classify <- paste(
+      "java -jar", shQuote(jar_path_abs), "classify",
+      "--in", shQuote(hsdfile),
+      "--format hsd",
+      "--out", shQuote(outputfile_haplogrep),
+      "--extend-report"
+    )
+    
+    # Run the command
+    exit_status <- system(cmd_classify)
+    
+    if (exit_status != 0) {
+      warning("HaploGrep2 failed on file: ", hsdfile)
+    }
+    
+  } else {
+    message("Skipping: ", file_base, " (Output already exists)")
+  }
+}
+
+
+allDeep_1000G <- read.delim("data/output_results/allDeep_1000G_classified.txt")
+allDeep_1000G <-allDeep_1000G %>% select(SampleID, Range, Haplogroup, Input_Sample )
 allDeep_1000G$Dataset<-"1000G"
 
 allDeep_1000G_dist <- allDeep_1000G %>%
   distinct(Input_Sample, .keep_all = TRUE)
 
-all1000G_3k <- read.delim("data/1000G-3202_extend.hsd")
+all1000G_3k <- read.delim("data/output_results/1000G-3202_extend_classified.txt")
+all1000G_3k <-all1000G_3k %>% select(SampleID, Range, Haplogroup, Input_Sample )
 all1000G_3k$Dataset<-"1000G 3202"
 
 all1000G_3k_dist <- all1000G_3k %>%
   distinct(Input_Sample, .keep_all = TRUE)
 
   
-allDeep_HGDP <- read.delim("data/allDeep_HGDP.hsd")
+allDeep_HGDP <- read.delim("data/output_results/allDeep_HGDP_classified.txt")
+allDeep_HGDP <-allDeep_HGDP %>% select(SampleID, Range, Haplogroup, Input_Sample )
 allDeep_HGDP$Dataset <- "HGDP"
 
-allDeep_SGDP <- read.delim("data/allDeep_SGDP.hsd")
+allDeep_SGDP <- read.delim("data/output_results/allDeep_SGDP_classified.txt")
+allDeep_SGDP <-allDeep_SGDP %>% select(SampleID, Range, Haplogroup, Input_Sample )
 allDeep_SGDP$Dataset <- "SGDP"
 
 
