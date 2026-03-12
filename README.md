@@ -4,7 +4,7 @@ This repository contains Python and R-scripts to analyze mitochondrial DNA (mtDN
 
 The repository contains the main folders:
 
--   **arrays:** here comparison on 3 different layers are included - 1. array_afr: comparison of the own appraoch to the work of one from Lankheet et al based on a reference panel with approx. 200 african haplogroups, preparation of snps for 2. array_axiom: Axiom+Affymetrix and 3. array_illumina for Illumina genotyoping arrays, including the Thermofisher arrays - where we show meta-information in "compare_microarrays.rmd"
+-   **arrays:** here comparison on 3 different layers are included - 1. array_afr: comparison of the own appraoch to the work of one from Lankheet et al based on a reference panel with approx. 200 african haplogroups, preparation of snps for 2. array_axiom: Axiom+Affymetrix and 3. array_illumina for Illumina genotyoping arrays, including the Thermofisher arrays - where we show meta-information in "compare_microarrays.rmd" and the main results of the haplogroup comparisons
 
 -   **bin**: haplogrep 2.4 for haplogroup assignment and distance calculation between expected and found haplogroup.
 
@@ -17,7 +17,5 @@ The repository contains the main folders:
 -   **results/check_VCF:** here an own VCF file can be specified and compared to some representative microarrays, ideal for quality control purposes
 
 ## TODO
-
--   compare all genotyping arrays to entire phylotree 17FU1 and calculate metrics
-
--   repeat per 1000G major population, including entire 1000G
+- clean compare_microarrays.rmd in arrays/array_illumina
+- split compare_microarrays.rmd in 2 .rmd files (one for processing snp_positions) and clustering, the other for the haplogroup comparison of either main clusters / all unique arrays
