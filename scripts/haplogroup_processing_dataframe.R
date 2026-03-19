@@ -2,6 +2,8 @@ library(networkD3)
 library(htmlwidgets) 
 library(dplyr)
 library(stringr)
+library(here)
+
 
 .derive_MacroPhylo <- function(Hgsubgroup_col, oneletter_col) {
   case_when(
@@ -68,9 +70,10 @@ process_haplogroup_data <- function(array_type,
                                     array_file_path = NULL, 
                                     array_df=NULL,
                                     hsd_data,
+                                    pop=pop,
                                     output_base_name) {
-  
-  jar_path_abs <- normalizePath("../../bin/haplogrep.jar", mustWork = TRUE)
+
+  jar_path_abs <- here("bin", "haplogrep.jar")
   
   # 1. Setup Folders
   plot_dir <- "plots"
@@ -91,13 +94,12 @@ process_haplogroup_data <- function(array_type,
   } else {
     stop("You must provide either 'array_file_path' or 'array_df'.")
   }
-  
-  
+
   # 3. Define output paths INSIDE the output folder
-  temp_haplogrep_input_file <- file.path(output_dir, paste0("temp_haplogrep_input_", output_base_name, ".hsd"))
-  outputfile_haplogrep <- file.path(output_dir, paste0(output_base_name, "_haplogrep_out.txt"))
-  haplogroup_distcheck_file <- file.path(output_dir, paste0(output_base_name, "_haplogroup_distcheck.txt"))
-  haplogroup_distcheck_result_file <- file.path(output_dir, paste0(output_base_name, "_haplogroup_distcheck_result.txt"))
+  temp_haplogrep_input_file <- file.path(output_dir, paste0("temp_haplogrep_input_", output_base_name,"_",pop,".hsd"))
+  outputfile_haplogrep <- file.path(output_dir, paste0(output_base_name,"_",pop, "_haplogrep_out.txt"))
+  haplogroup_distcheck_file <- file.path(output_dir, paste0(output_base_name,"_",pop, "_haplogroup_distcheck.txt"))
+  haplogroup_distcheck_result_file <- file.path(output_dir, paste0(output_base_name,"_",pop, "_haplogroup_distcheck_result.txt"))
   
   hsd_data_local <- hsd_data
   hsd_data_local[[2]] <- arrayPos
@@ -188,7 +190,7 @@ process_haplogroup_data <- function(array_type,
                                  colourScale = JS('d3.scaleOrdinal(d3.schemeCategory10);'))
     
     # 3. Save the Sankey Plot to the plots folder
-    plot_file_path <- file.path(plot_dir, paste0(output_base_name, "_sankey.html"))
+    plot_file_path <- file.path(plot_dir, paste0(output_base_name,"_",pop,"_sankey.html"))
     saveWidget(sankey_plot, file = plot_file_path, selfcontained = TRUE)
     message(paste("Sankey plot saved to:", plot_file_path))
     

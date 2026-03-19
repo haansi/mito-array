@@ -3,6 +3,7 @@ title: "Compare MT content for genotyping arrays"
 author: "Hansi"
 date: "2025-08-07"
 output: html_document
+
 ---
 
 ```{r setup, include=FALSE}
@@ -16,6 +17,7 @@ library(factoextra)
 library(ggpubr)
 
 options(warn = -1)
+library(here)
 library(purrr)
 library(furrr)
 library(progressr)
@@ -23,6 +25,7 @@ library(kableExtra)
 library(plotly)
 library(ggridges)
 options(warn = 0)
+
 
 ```
 
@@ -55,6 +58,7 @@ if (!file.exists(illumina_data)) {
     group_by(Microarray_ID) %>%
     summarise(Variant_Count = n())
 }
+
 
 # Read the list of empty files and create a data frame
 # Handle the case where the file might not exist or be empty
@@ -158,15 +162,13 @@ combined_df <- combined_df %>%
   mutate(Microarray_ID = str_remove(Microarray_ID, ".annot")) %>%
   mutate(Microarray_ID = str_remove(Microarray_ID, "b37"))
 
-write.table(combined_df, "combined_arrays.txt", row.names = FALSE, sep="\t")
-
 combined_df <- combined_df %>%
   group_by(Microarray_ID) %>%
   mutate(n_snps = n_distinct(Position)) %>%
   ungroup() %>%
   mutate(id_label = paste0(Microarray_ID, " (", n_snps, ")"))
 
-
+write.table(combined_df, "combined_arrays.txt", row.names = FALSE, sep="\t")
 
 haplogrep_annotation <- haplogrep_annotation %>%
   mutate(Position = parse_number(Mutation))
@@ -362,6 +364,8 @@ final_representatives <- unique_cluster_df %>%
 # Quick check: did we get the right numbers?
 print(select(final_representatives, ArrayType, ClusterID, snp_num, extreme_label))
 
+write.table(final_representatives, file="final_representative_arrays.txt", sep=",", row.names = FALSE)
+write.table(unique_cluster_df, file="all_unique_arrays.txt", sep=",", row.names = FALSE)
 ```
 
 ## Check RefAlt files
@@ -405,12 +409,14 @@ snp_refAlt_neg_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="-",], by.x="SNP
 
 # Compare major arrays for haplogroup metrics
 
-```{r, echo=FALSE, warnings=FALSE, message=FALSE, img.w}
+```{r, echo=FALSE, warnings=FALSE, message=FALSE, fig.width=9, fig.height=11, out.width="100%"}
 
-
-source("../../scripts/haplogroup_processing_dataframe.R")
+source(here("scripts/haplogroup_processing_dataframe.R"))
+compute_path <- here("scripts", "haplogroup_processing_dataframe.R")
 
 phylotreeVersion <- "17_FU1"
+
+
 
 .options = furrr_options(
   globals = c("process_haplogroup_data", "hsd_path_abs"),
@@ -422,25 +428,27 @@ phylotreeVersion <- "17_FU1"
 
 ##test-scenarios######################################################
 #hsd_path_abs <- normalizePath("data/test10AFR.hsd", mustWork = TRUE)
-#hsd_path_abs <- normalizePath("data/test193AFR.hsd", mustWork = TRUE)
-#hsd_data <- read.delim(hsd_path_abs)
-#hsd_data[[3]] <- ""
-#hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+hsd_path_abs <- normalizePath("data/test193AFR.hsd", mustWork = TRUE)
+hsd_data <- read.delim(hsd_path_abs)
+hsd_data[[3]] <- ""
+hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+
+pop="AFR_193"
 
 
 #csv_path_abs <- normalizePath("../../reference/output/ref_AFR.csv", mustWork = TRUE)
 #csv_path_abs <- normalizePath("../../reference/output/ref_EUR.csv", mustWork = TRUE)
-csv_path_abs <- normalizePath("../../reference/output/ref_AMR.csv", mustWork = TRUE)
+#csv_path_abs <- normalizePath("../../reference/output/ref_AMR.csv", mustWork = TRUE)
 #csv_path_abs <- normalizePath("../../reference/output/ref_EAS.csv", mustWork = TRUE)
 #csv_path_abs <- normalizePath("../../reference/output/ref_SAS.csv", mustWork = TRUE)
 #csv_path_abs <- normalizePath("../../reference/output/ref_ALL.csv", mustWork = TRUE)
 #csv_path_abs <- normalizePath("../../reference/output/ref_Oth.csv", mustWork = TRUE)
-csv_data <- read.delim(csv_path_abs, sep=",")
-hsd_data <- csv_data[,1:4]
-hsd_data$SampleID<-paste(hsd_data$SampleID,"-",hsd_data$Haplogroup, sep="")
-hsd_data[[3]] <- ""
-hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
-hsd_data <- hsd_data[hsd_data$SampleID != "mt-MRCA", ]
+#csv_data <- read.delim(csv_path_abs, sep=",")
+#hsd_data <- csv_data[,1:4]
+#hsd_data$SampleID<-paste(hsd_data$SampleID,"-",hsd_data$Haplogroup, sep="")
+#hsd_data[[3]] <- ""
+#hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
+#hsd_data <- hsd_data[hsd_data$SampleID != "mt-MRCA", ]
 
 
 #plan(sequential)
@@ -469,7 +477,8 @@ with_progress({
       process_haplogroup_data(
         array_type = current_id,
         array_df = df_group,
-        hsd_data = hsd_data,  
+        hsd_data = hsd_data,
+        pop=pop,
         output_base_name = paste0("out_", current_id)
       )
     },
@@ -477,11 +486,12 @@ with_progress({
       globals = c(
         "process_haplogroup_data",
         "hsd_data",
+        "pop",
         "phylotreeVersion",
         "get_Supergroups",
         ".derive_MacroPhylo"
       ),
-      packages = c("dplyr", "stringr", "networkD3", "htmlwidgets")
+      packages = c("dplyr", "stringr", "networkD3", "htmlwidgets", "here")
     ),
     .progress = TRUE
   )
