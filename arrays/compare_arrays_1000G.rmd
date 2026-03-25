@@ -24,6 +24,7 @@ library(furrr)
 library(progressr)
 library(kableExtra)
 library(plotly)
+library(tibble)
 library(ggridges)
 options(warn = 0)
 
@@ -120,6 +121,121 @@ with_progress({
   )
 })
 
+
+#### Comparison based on nomenclature / namings
+
+haplogroupsDiff_all <- haplogroupsDiff_all %>%
+  mutate(
+    matched_subgroup   = as.integer(!is.na(hg1_Hgsubgroup) & !is.na(hg2_Hgsubgroup) & hg1_Hgsubgroup == hg2_Hgsubgroup),
+    matched_oneletter  = as.integer(!is.na(hg1_oneletter)  & !is.na(hg2_oneletter)  & hg1_oneletter  == hg2_oneletter),
+    matched_macro      = as.integer(!is.na(hg1_MacroPhylo) & !is.na(hg2_MacroPhylo) & hg1_MacroPhylo == hg2_MacroPhylo),
+
+    # Haplogroup-level match (strict)
+    matched_haplogroup = as.integer(!is.na(hg1) & !is.na(hg2) & hg1 == hg2 &
+                                    !is.na(distance) & distance == 0),
+
+    matched_level = case_when(
+      matched_haplogroup == 1 ~ "1. Haplogroup",
+      matched_subgroup   == 1 ~ "2. Subgroup",
+      matched_oneletter  == 1 ~ "3. One-letter",
+      matched_macro      == 1 ~ "4. MacroPhylo",
+      TRUE                   ~ "5. Mismatch"
+    )
+  )
+
+# Ensure matched_level is an ordered factor
+haplogroupsDiff_all <- haplogroupsDiff_all %>%
+  mutate(
+    matched_level = factor(
+      matched_level,
+      levels = c("1. Haplogroup", "2. Subgroup", "3. One-letter", "4. MacroPhylo", "5. Mismatch"),
+      ordered = TRUE
+    )
+  )
+
+
+level_cols <- c(
+  "1. Haplogroup" = "#1b9e77",
+  "2. Subgroup"   = "#41ab5d",
+  "3. One-letter" = "#78c679",
+  "4. MacroPhylo" = "#addd8e",
+  "5. Mismatch"   = "#d9d9d9"
+)
+
+# Aggregate proportions by ArrayType and level
+level_dist <- haplogroupsDiff_all %>%
+  count(ArrayType, matched_level, name = "n") %>%
+  group_by(ArrayType) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+# One-row-per-array table with haplogroup pct for ordering
+order_tbl <- level_dist %>%
+  filter(matched_level == "1. Haplogroup") %>%
+  select(ArrayType, haplo_pct = pct)
+
+# Ensure every ArrayType has an order key (arrays with no "1. Haplogroup" -> 0)
+all_arrays <- level_dist %>%
+  distinct(ArrayType)
+
+order_tbl <- all_arrays %>%
+  left_join(order_tbl, by = "ArrayType") %>%
+  mutate(haplo_pct = tidyr::replace_na(haplo_pct, 0))
+
+# Build explicit factor levels (best to worst by haplo_pct)
+levels_ord <- order_tbl %>%
+  arrange(desc(haplo_pct), ArrayType) %>%  # tie-breaker by name for stability
+  pull(ArrayType)
+
+# Add ordered factor to the plotting data
+level_dist_ord <- level_dist %>%
+  mutate(ArrayType_ord = factor(ArrayType, levels = levels_ord))
+
+
+p<-ggplot(level_dist_ord, aes(x = ArrayType_ord, y = pct, fill = matched_level)) +
+  geom_col() +
+  labs(x = "Microarray", y = "Proportion", fill = "Level",
+       title = "") +
+  theme_bw() + scale_fill_manual(values = level_cols, drop = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  + theme(legend.position = "top")
+
+ggplotly(p)
+
+
+p<-ggplot(level_dist_ord, aes(x = matched_level, y = ArrayType_ord, fill = pct)) +
+  geom_tile() +
+  scale_fill_viridis_c(labels = scales::percent, direction = -1) +
+  labs(x = "Match level", y = "Microarray", fill = "Proportion",
+       title = paste("Match-level composition by microarray - ", pop))  +
+  theme_bw()
+
+ggplotly(p)
+
+
+
+weights <- c(`1. Haplogroup` = 1.00, `2. Subgroup` = 0.75, `3. One-letter` = 0.50, `4. MacroPhylo` = 0.25, `5. Mismatch` = 0)
+
+scored <- haplogroupsDiff_all %>%
+  mutate(score = dplyr::case_when(
+    matched_haplogroup == 1 ~ 1.00,
+    matched_subgroup   == 1 ~ 0.75,
+    matched_oneletter  == 1 ~ 0.50,
+    matched_macro      == 1 ~ 0.25,
+    TRUE ~ 0
+  )) %>%
+  group_by(ArrayType) %>%
+  summarise(n = n(), Mean_Match_Score = mean(score), .groups = "drop") %>%
+  arrange(desc(Mean_Match_Score))
+
+p1 <- ggplot(scored, aes(x = Mean_Match_Score, y = reorder(ArrayType, Mean_Match_Score))) +
+  geom_point(color = "#1a9850") +
+  labs(x = "Mean weighted score", y = "Microarray",
+       title = paste("Weighted performance score by microarray - ", pop)) +
+  theme_bw()
+
+ggplotly(p1)
+
+
 p <- ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType, group = ArrayType)) +
   stat_ecdf(geom = "line") +
   theme_minimal()
@@ -127,15 +243,15 @@ p <- ggplot(haplogroupsDiff_all, aes(x = distance, color = ArrayType, group = Ar
 ggplotly(p)
 
 
-ggplot(haplogroupsDiff_all, aes(x = distance, y = ArrayType, fill = ..x..)) +
-  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+ggplot(haplogroupsDiff_all, aes(x = distance, y = reorder(ArrayType, distance, FUN = median), 
+           fill = ..x..)) + geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
   scale_fill_viridis_c(name = "Distance", option = "C") +
-  labs(title = "Distributions of Distances across Genotyping Arrays") +
-  theme_ridges() +
-  theme(axis.text.y = element_text(size = 6)) # Shrink text to fit 150 labels
+  labs(title = "Distributions of Distances across Genotyping Arrays",
+       y = "Array Type") + # Clean up the axis label
+  theme_ridges() +   theme(axis.text.y = element_text(size = 6))
 
 
-ggplot(haplogroupsDiff_all, aes(x = distance, group = ArrayType)) +
+p<-ggplot(haplogroupsDiff_all, aes(x = distance, group = ArrayType)) +
   # Draw all 150 lines in very light gray
   stat_ecdf(geom = "line", color = "gray90", size = 0.2) + 
   # Highlight the global average or a specific group of interest in bold
@@ -144,8 +260,9 @@ ggplot(haplogroupsDiff_all, aes(x = distance, group = ArrayType)) +
   theme_minimal() +
   labs(title = "Individual Haplogroup Distance vs. Global Average (Blue)")
 
+ggplotly(p)
 
-# 1. Calculate percentiles for each ArrayType
+# Calculate percentiles for each ArrayType
 # We'll look at every 10th percentile plus the 95th and 99th for outlier detection
 heatmap_data <- haplogroupsDiff_all %>%
   group_by(ArrayType) %>%
@@ -154,7 +271,7 @@ heatmap_data <- haplogroupsDiff_all %>%
     dist_value = quantile(distance, probs = percentile, na.rm = TRUE)
   )
 
-# 2. Create the Heatmap
+# Create the Heatmap
 ggplot(heatmap_data, aes(x = factor(percentile), 
                          y = reorder(ArrayType, dist_value, FUN = median), 
                          fill = dist_value)) +
@@ -229,6 +346,12 @@ haplogroupsDiff_all <- haplogroupsDiff_all %>%
     InLegend = ArrayType %in% keep_in_legend
   )
 
+
+write.table(haplogroupsDiff_all, file=paste("haplogroups_diff_all_",pop,".txt"), sep="\t", row.names=FALSE)
+
+
+
+
 # 3. Build the Plot
 p <- ggplot(haplogroupsDiff_all, aes(x = distance, color = Group, group = ArrayType)) +
   # Use 'text' aesthetic to customize the mouse-over tooltip
@@ -261,7 +384,7 @@ rep_20_plot_data <- haplogroupsDiff_all %>%
   filter(ArrayType %in% final_representatives$ArrayType) %>%
   left_join(final_representatives, by = "ArrayType")
 
-ggplot(rep_20_plot_data, aes(x = distance, color = extreme_label, group = ArrayType)) +
+p<-ggplot(rep_20_plot_data, aes(x = distance, color = extreme_label, group = ArrayType)) +
   stat_ecdf(geom = "line", size = 1.1) +
   facet_wrap(~ClusterID, ncol = 5, labeller = label_both) + 
   scale_color_manual(values = c("Highest" = "#D55E00", "Lowest" = "#0072B2", "Mean-ish"="#009E73")) +
@@ -276,6 +399,7 @@ ggplot(rep_20_plot_data, aes(x = distance, color = extreme_label, group = ArrayT
   theme(strip.background = element_rect(fill = "gray95", color = NA),
         legend.position = "bottom")
 
+ggplotly(p)
 #######################################
 
 
@@ -292,10 +416,10 @@ auc_results <- haplogroupsDiff_all %>%
     n = n()
   ) %>%
   mutate(Tier = case_when(
-    AUC_Normalized >= 0.95 ~ "🥇 Gold (Excellent)",
-    AUC_Normalized >= 0.85 ~ "🥈 Silver (Good)",
-    AUC_Normalized >= 0.75 ~ "🥉 Bronze (Fair)",
-    TRUE                   ~ "⚠️ Low Performance"
+    AUC_Normalized >= 0.95 ~ "1. High",
+    AUC_Normalized >= 0.85 ~ "2. Good",
+    AUC_Normalized >= 0.75 ~ "3. Fair",
+    TRUE                   ~ "4. Poor"
   )) %>%
   arrange(desc(AUC_Normalized))
 
@@ -306,20 +430,25 @@ worst_array_name <- auc_results$ArrayType[nrow(auc_results)]
 
 auc_results$Population<-pop
 
+auc_results <- auc_results %>%
+  left_join(scored, by = "ArrayType") %>%
+  rename(n = n.x) %>%
+  select(-n.y)
+
 write.table(auc_results, file=paste("AUC_results_",pop,".txt", sep=""), sep=",",row.names = FALSE)
 
 kable(auc_results, 
-      col.names = c("Microarray", "Normalized AUC", "Mean Distance", "Sample Size", "Performance Tier", "Population"),
+      col.names = c("Microarray", "Normalized AUC", "Mean Distance", "Sample Size", "Performance Tier", "Population", "Mean Match Score"),
       digits = 3,
       caption = paste("Microarray Performance Ranking with Tiers", pop))
 
 ggplot(auc_results, aes(x = reorder(ArrayType, AUC_Normalized), y = AUC_Normalized, fill = Tier)) +
   geom_col() +
   coord_flip() +
-  scale_fill_manual(values = c("🥇 Gold (Excellent)" = "#FFD700", 
-                               "🥈 Silver (Good)" = "#C0C0C0", 
-                               "🥉 Bronze (Fair)" = "#CD7F32", 
-                               "⚠️ Low Performance" = "#E57373")) +
+  scale_fill_manual(values = c("1. High" = "#FFD700", 
+                               "2. Good" = "#C0C0C0", 
+                               "3. Fair" = "#CD7F32", 
+                               "4. Poor" = "#E57373")) +
   labs(title = paste("Microarray Accuracy Scores (AUC Norm.) ", pop),
        x = "Microarray Type",
        y = "Accuracy Score (0-1)",
