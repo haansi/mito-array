@@ -35,6 +35,7 @@ set.seed(params$seed)
 ```
 
 # 1. Summary: Top 10 Overall
+
 This table ranks arrays by their average Z-score performance across all detected populations.
 
 ```{r, warning=FALSE, echo=FALSE}
@@ -102,6 +103,7 @@ summary_tab %>%
 ```
 
 # 2. Global Performance Visuals
+
 AUC Distribution by Population
 
 ```{r, warning=FALSE, echo=FALSE}
@@ -122,6 +124,7 @@ ggplot(df_scored, aes(population, mean_match_score, fill = population)) +
 ```
 
 Clustering: Array Profiles
+
 ```{r, warning=FALSE, echo=FALSE, fig.height=12, fig.width=9}
 # Function to generate a standardized heatmap
 make_heatmap <- function(metric_col, label) {
@@ -146,8 +149,6 @@ make_heatmap("mean_match_score", "Mean Match Score")
 
 ```
 
-
-
 # 3. Population Breakdowns
 
 ```{r, warning=FALSE, echo=FALSE}
@@ -169,26 +170,99 @@ plot_population <- function(pop_name) {
 }
 ```
 
-
-
 ```{r, results='asis', echo=FALSE, message=FALSE, warning=FALSE}
 all_pops <- sort(unique(trimws(df_scored$population)))
 
 for (pop in all_pops) {
-  # H2 heading (works in HTML; style ignored in PDF/Word)
-  knitr::asis_output(
-    paste0("\n\n## ", pop, " {style='border-bottom: 1px solid #eee; padding-top: 20px;'}\n\n```{r}")
-  )
-  
   p <- plot_population(pop)   # returns a ggplot; no side effects
-  if (inherits(p, "ggplot")) print(p)  # print exactly once
-  
-  cat("\n\n")
+  if (inherits(p, "ggplot")) print(p)  
 }
+
 ```
 
+# 4. Haplogroup Match Details
 
-# 4. Data Explorer
+Overview of Haplogroup matching details a) perfect match, subhaplogroup match, one-letter match, macrhaplogroup match or mismatch (e.g. L vs H)
+
+```{r, warning=FALSE, echo=FALSE}
+# 1. Load and Harmonize
+files_HaploDiff <- list.files(params$data_dir, pattern = params$files_HaploDiff, full.names = TRUE)
+stopifnot(length(files_HaploDiff) > 0)
+
+df_match <- files_HaploDiff %>%
+  set_names() %>% 
+  map_df(~read_delim(.x, show_col_types = FALSE), .id = "file_origin") %>%
+  clean_names() %>%
+  mutate(
+    population = file_origin %>% 
+      str_remove_all("\\.txt") %>% 
+      str_remove_all(".//haplogroups_diff_all_") 
+    ) %>%
+  select(-file_origin)
+
+binary_cols <- c("matched_haplogroup", "matched_subgroup", "matched_macro", "matched_oneletter")
+
+summary <- df_match %>%
+  group_by(population) %>%
+  summarise(
+    across(all_of(binary_cols), ~ mean(.x, na.rm = TRUE)),
+    distance = mean(distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+long_bin <- summary %>%
+  pivot_longer(cols = all_of(binary_cols), names_to = "metric", values_to = "proportion") %>%
+  mutate(
+    metric = recode(metric,
+                    matched_haplogroup = "Perfect hits",
+                    matched_subgroup   = "Subgroup concordance",
+                    matched_macro      = "Macrohaplogroup concordance",
+                    matched_oneletter  = "One-letter concordance")
+  )
+
+# Order populations by size (or choose another ordering)
+long_bin <- long_bin %>%
+  mutate(population = fct_reorder(population, -n_arrays))
+
+summary <- summary %>%
+  mutate(population = factor(population, levels = levels(long_bin$population)))
+
+
+ggplot() +
+  geom_col(
+    data = long_bin,
+    aes(x = population, y = proportion, fill = metric),
+    position = position_dodge(width = 0.8),
+    width = 0.75,
+    color = "black"
+  ) +
+  geom_line(
+    data = summary,
+    aes(x = population, y = distance / scale_factor, group = 1),
+    color = "red", linewidth = 1.2
+  ) +
+  geom_point(
+    data = summary,
+    aes(x = population, y = distance / scale_factor),
+    color = "red", size = 2
+  ) +
+  scale_y_continuous(
+    name = "Proportion (mean of 0/1 metrics)",
+    limits = c(0, 1),
+    sec.axis = sec_axis(~ . * scale_factor, name = "Mean node distance")
+  ) +
+  scale_fill_brewer(palette = "Set2", name = "Metric") +
+  labs(x = "Population") +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+```
+
+# 5. Data Explorer
+
 Use the search box below to filter specific arrays. You can copy this data or use the buttons below to save the full scored dataset.
 
 ```{r, warning=FALSE, echo=FALSE}
