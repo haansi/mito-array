@@ -1,0 +1,213 @@
+---
+title: "Microarray Performance Across Populations"
+author: "Hansi"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+params:
+  data_dir: "./"
+  files_AUC: "AUC_results_.*\\.txt$"
+  files_HaploDiff: "haplogroups_diff_all_.*\\.txt$"
+  pareto_w: 0.25
+  score_w: 1.0
+  seed: 123
+  w_auc: 0.6
+  w_match: 0.4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6)
+
+# Load libraries
+library(tidyverse)
+library(janitor)
+library(ggrepel)
+library(scales)
+library(ComplexHeatmap)
+library(kableExtra)
+library(DT) # For interactive tables
+
+set.seed(params$seed)
+```
+
+# 1. Summary: Top 10 Overall
+This table ranks arrays by their average Z-score performance across all detected populations.
+
+```{r, warning=FALSE, echo=FALSE}
+# 1. Load and Harmonize
+files_AUC <- list.files(params$data_dir, pattern = params$files_AUC, full.names = TRUE)
+stopifnot(length(files_AUC) > 0)
+
+df_raw <- map_df(files_AUC, ~read_csv(.x, show_col_types = FALSE) %>% clean_names()) %>%
+  mutate(population = coalesce(!!!select(., matches("^pop(ulation)?(_\\d+)?$")))) %>%
+  select(array_type, population, auc_normalized, mean_distance, mean_match_score, tier) %>%
+  mutate(across(c(auc_normalized, mean_distance, mean_match_score), as.numeric)) %>%
+  filter(!is.na(population), !is.na(auc_normalized))
+
+df_AUC_ALL<-subset(df_raw, population=="ALL") 
+df_AUC<-subset(df_raw, population!="ALL")
+
+
+
+# 2. Calculate Metrics weighting 
+
+safe_z <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  s <- stats::sd(x, na.rm = TRUE)
+  if (is.na(s) || s == 0) return(rep(0, length(x)))  # if no variation, set z = 0
+  (x - m) / s
+}
+
+df_scored <- df_AUC %>%
+  group_by(population) %>%
+  mutate(
+    auc_z    = safe_z(auc_normalized),    # larger is better
+    dist_z   = safe_z(mean_distance),     # smaller is better 
+    match_z  = safe_z(mean_match_score),  # larger is better
+    # Composite based on AUC and MATCH only (both larger is better)
+    composite_z = params$w_auc * auc_z + params$w_match * match_z,
+    pareto_score = auc_normalized - (params$pareto_w * mean_distance)
+  ) %>% 
+  mutate(composite_01 = pnorm(composite_z)) %>%
+  ungroup()
+
+# 3. Summary Table Logic
+summary_tab <- df_scored %>%
+  group_by(array_type) %>%
+    summarize(
+    `Avg AUC` = mean(auc_normalized, na.rm = TRUE),
+    `Avg Distance` = mean(mean_distance, na.rm = TRUE),
+    `Avg Match Score` = mean(mean_match_score, na.rm = TRUE),
+    `Global Score (Z)` = mean(composite_z, na.rm = TRUE),
+    `Pops` = n_distinct(population)
+  ) %>%
+  slice_max(order_by = `Global Score (Z)`, n = 10) %>%
+  arrange(desc(`Global Score (Z)`)) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+summary_tab <- summary_tab %>% rename(Array = array_type)
+
+
+summary_tab %>%
+  kable(caption = "Top 10 Microarrays (Ranked by Cross-Population Z-Score)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  row_spec(0, bold = T, color = "white", background = "#2A9D8F")
+
+
+
+```
+
+# 2. Global Performance Visuals
+AUC Distribution by Population
+
+```{r, warning=FALSE, echo=FALSE}
+ggplot(df_scored, aes(population, auc_normalized, fill = population)) +
+  geom_violin(alpha = 0.4, color = NA) + 
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.8) +
+  theme_minimal() + 
+  scale_fill_viridis_d(option = "B") +
+  labs(title = "Haplogroup Assignment Performance AUC", y = "Normalized AUC")
+
+ggplot(df_scored, aes(population, mean_match_score, fill = population)) +
+  geom_violin(alpha = 0.4, color = NA) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.8) +
+  theme_minimal() + 
+  scale_fill_viridis_d(option = "B") +
+  labs(title = "Mean Haplogroup Matching Score", y = "mean matching score")
+
+```
+
+Clustering: Array Profiles
+```{r, warning=FALSE, echo=FALSE, fig.height=12, fig.width=9}
+# Function to generate a standardized heatmap
+make_heatmap <- function(metric_col, label) {
+  mat <- df_scored %>%
+    select(array_type, population, !!sym(metric_col)) %>%
+    pivot_wider(names_from = population, values_from = !!sym(metric_col)) %>%
+    column_to_rownames("array_type") %>% 
+    as.matrix()
+  
+  ht=Heatmap(mat, name = label, heatmap_legend_param = list(direction = "horizontal"),
+          col = colorRampPalette(c("#E63946","#F5C518","#2A9D8F"))(100),
+          row_names_gp = gpar(fontsize = 7),
+          column_title = paste("Arrays Clustered by", label))
+  
+  draw(ht, heatmap_legend_side = "bottom")
+  
+}
+
+make_heatmap("auc_normalized", "AUC")
+
+make_heatmap("mean_match_score", "Mean Match Score")
+
+```
+
+
+
+# 3. Population Breakdowns
+
+```{r, warning=FALSE, echo=FALSE}
+# Define reusable plotting logic per population
+plot_population <- function(pop_name) {
+  pop_data <- df_scored %>% filter(population == pop_name)
+  
+  p <- ggplot(pop_data, aes(mean_match_score, auc_normalized, color = tier)) +
+    geom_point(alpha = 0.6, size = 2.5) +
+    geom_text_repel(data = slice_max(pop_data, pareto_score, n = 5), 
+                    aes(label = array_type), size = 3, fontface = "bold") +
+    theme_light() +
+    labs(title=pop_name, subtitle = paste("Top 5 Pareto performers labeled"),
+         x = "Mean Haplogrouping Matching Score (Higher is Better)", 
+         y = "AUC (Higher is Better)") +
+    scale_color_brewer(palette = "Set1")
+  
+  return(p)
+}
+```
+
+
+
+```{r, results='asis', echo=FALSE, message=FALSE, warning=FALSE}
+all_pops <- sort(unique(trimws(df_scored$population)))
+
+for (pop in all_pops) {
+  # H2 heading (works in HTML; style ignored in PDF/Word)
+  knitr::asis_output(
+    paste0("\n\n## ", pop, " {style='border-bottom: 1px solid #eee; padding-top: 20px;'}\n\n```{r}")
+  )
+  
+  p <- plot_population(pop)   # returns a ggplot; no side effects
+  if (inherits(p, "ggplot")) print(p)  # print exactly once
+  
+  cat("\n\n")
+}
+```
+
+
+# 4. Data Explorer
+Use the search box below to filter specific arrays. You can copy this data or use the buttons below to save the full scored dataset.
+
+```{r, warning=FALSE, echo=FALSE}
+
+df_ranked <- df_scored %>%
+  group_by(population) %>%
+  arrange(population, desc(auc_normalized), .by_group = TRUE) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  mutate(
+    pop_rank_auc = min_rank(desc(auc_normalized)),   # ties share the same rank (1,1,3…)
+  ) %>% 
+  select(array_type, population, pop_rank_auc, auc_normalized, auc_z, mean_distance, mean_match_score, tier)  %>% 
+  ungroup()
+
+datatable(df_ranked, extensions = 'Buttons', filter = "top", options = list(
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel')
+  ))
+
+# Optional: Save a physical CSV of processed scores to the directory
+write_csv(df_scored, "processed_microarray_scores.csv")
+```
