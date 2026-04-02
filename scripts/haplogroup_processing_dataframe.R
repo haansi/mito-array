@@ -118,7 +118,7 @@ process_haplogroup_data <- function(array_type,
     system(cmd_classify)
   }
   
-  # Process classified results
+  # Process classified results separated with "-"
   haplogroups <- read.delim(outputfile_haplogrep, sep = "\t", header = TRUE)
   haplogroupsList <- haplogroups %>%
     mutate(SampleID = if_else(
