@@ -71,6 +71,7 @@ process_haplogroup_data <- function(array_type,
                                     array_df=NULL,
                                     hsd_data,
                                     pop=pop,
+                                    phylotreeVersion=phylotreeVersion,
                                     output_base_name) {
 
   jar_path_abs <- here("bin", "haplogrep.jar")
