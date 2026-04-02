@@ -1,0 +1,494 @@
+---
+title: "Microarray Performance Across Populations"
+author: "Hansi"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+params:
+  data_dir: "./"      # directory with the six CSV files
+  file_pattern: "AUC_results_.*\\.txt$"       # pattern to match input files
+  top_n_overall: 15             # how many top arrays to label/plot
+  pareto_w: 0.25                # weight of distance in pareto score (AUC - w * distance)
+  score_w: 1.0                  # weight on distance in overall score: auc_z - w * dist_z
+  seed: 123
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE, fig.width = 8, fig.height = 5
+)
+set.seed(params$seed)
+```
+
+# 1. Overview and data expectations
+
+This report aggregates per-population TXT files containing microarray
+performance metrics for haplogroup assignment. Expected columns
+(case-insensitive, will be cleaned to snake_case): - ArrayType →
+array_type - AUC_Normalized → auc_normalized (higher is better) -
+Mean_Distance → mean_distance (lower is better) - n → n - Tier → tier -
+Population → population
+
+We will: - Ingest and harmonize the six TXT files - Diagnose common
+schema issues (e.g., duplicated/nested population columns) - Compute
+per-population ranks and z-scores - Build overall scores across
+populations - Visualize performance distributions, Pareto trade-offs,
+best arrays, heatmaps, and similarity maps
+
+Z-score standardization within each population: $$
+z = \frac{x - \mu}{\sigma}
+$$ Correlation-based distance for similarity mapping (using AUC
+profiles): $$
+d_{ij} = 1 - r_{ij}
+$$
+
+# 2. Packages
+
+```{r}
+library(tidyverse)   # dplyr, ggplot2, tidyr, readr, forcats, etc.
+library(janitor)     # clean_names
+library(ggrepel)     # smart text labels
+library(scales)      # number_format, percent
+library(broom)       # tidy model outputs (optional)
+```
+
+# 3. Read and harmonize data
+
+We robustly read all CSVs, clean column names, and fix cases where
+population becomes a data-frame column (df-col) due to header
+differences. We also ensure numeric types for measures and handle
+duplicate "population-like" columns by coalescing.
+
+```{r}
+# Locate files
+files <- list.files(params$data_dir, pattern = params$file_pattern, full.names = TRUE)
+stopifnot(length(files) > 0)
+
+# Helper to read one file with cleaned names
+read_one <- function(path) {
+  readr::read_csv(path, show_col_types = FALSE) |>
+    janitor::clean_names()
+}
+
+# Read all
+raw_list <- purrr::map(files, read_one)
+
+# Inspect schemas (names only) to spot inconsistencies
+schemas <- purrr::map(raw_list, names)
+schemas
+
+# Bind rows (may create df-cols if there are conflicting names)
+df <- dplyr::bind_rows(raw_list)
+
+# Ensure "population" exists or can be constructed from similarly named columns
+pop_candidates <- df |> dplyr::select(dplyr::matches("^population(\\_\\d+)?$|^pop(ulation)?$"))
+if (ncol(pop_candidates) == 0) {
+  stop("No population column found. Please check headers in your CSV files.")
+}
+
+# If we have multiple population-like columns, coalesce them (first non-missing)
+if (ncol(pop_candidates) > 1) {
+  df <- df |>
+    dplyr::mutate(population = dplyr::coalesce(!!!pop_candidates)) |>
+    dplyr::select(-dplyr::matches("^population\\_\\d+$"))
+} else {
+  # If population is a df-col with one column, flatten it
+  if (is.data.frame(df$population)) {
+    inner <- df$population
+    if (ncol(inner) == 1) {
+      df$population <- inner[[1]]
+    } else {
+      df$population <- do.call(dplyr::coalesce, as.list(inner))
+    }
+  }
+}
+
+# Standardize column names to the expected set (renames noop if already correct)
+df <- df |>
+  dplyr::rename(
+    array_type    = dplyr::any_of("array_type"),
+    auc_normalized = dplyr::any_of("auc_normalized"),
+    mean_distance  = dplyr::any_of("mean_distance"),
+    n              = dplyr::any_of("n"),
+    tier           = dplyr::any_of("tier"),
+    population     = dplyr::any_of("population"),
+    mean_match_score= dplyr::any_of("mean_match_score")
+  )
+
+# Enforce types
+df <- df |>
+  dplyr::mutate(
+    array_type    = as.character(array_type),
+    population    = as.character(population),
+    tier          = as.character(tier),
+    auc_normalized = suppressWarnings(as.numeric(auc_normalized)),
+    mean_distance  = suppressWarnings(as.numeric(mean_distance)),
+    n              = suppressWarnings(as.integer(n)),
+    mean_match_score  = suppressWarnings(as.numeric(mean_match_score))
+  )
+
+# Basic sanity checks
+stopifnot(all(c("array_type", "population", "auc_normalized", "mean_distance", "mean_match_score") %in% names(df)))
+df <- df |>
+  dplyr::filter(!is.na(array_type), !is.na(population)) |>
+  dplyr::mutate(
+    population = factor(population),
+    array_type = factor(array_type)
+  )
+
+glimpse(df)
+dplyr::count(df, population, name = "rows_per_population")
+```
+
+Notes: - If you still encounter "cannot xtfrm data frames," examine
+names(df) and str(df\$population) to ensure it's a simple vector after
+the steps above. - For emoji in tier, we keep it as character or factor;
+both work with ggplot.
+
+# 4. Quick summaries and derived metrics
+
+We compute per-population ranks, z-scores, and an overall composite
+score across populations.
+
+-   Rank within population:
+    -   Higher AUC = better rank
+    -   Lower distance = better rank
+-   Z-scores within population:
+    -   Standardizes distributions across populations
+-   Overall score across populations:
+    -   Average of per-row composite: score_row = auc_z − w × dist_z
+    -   Higher is better. w is adjustable via params\$score_w.
+
+```{r}
+# Rank within each population
+df_ranked <- df %>%
+  group_by(population) %>%
+  mutate(
+    auc_rank  = dense_rank(desc(auc_normalized)),
+    dist_rank = dense_rank(mean_distance) # smaller distance = better
+  ) %>%
+  ungroup()
+
+# Population-standardized z-scores
+df_scaled <- df %>%
+  group_by(population) %>%
+  mutate(
+    auc_z  = (auc_normalized - mean(auc_normalized, na.rm = TRUE)) /
+             sd(auc_normalized, na.rm = TRUE),
+    dist_z = (mean_distance  - mean(mean_distance,  na.rm = TRUE)) /
+             sd(mean_distance,  na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Composite overall score per array across populations
+w <- params$score_w
+overall <- df_scaled %>%
+  mutate(row_score = auc_z - w * dist_z) %>%
+  group_by(array_type) %>%
+  summarize(
+    n_pops   = n_distinct(population),
+    mean_auc = mean(auc_normalized, na.rm = TRUE),
+    mean_dist= mean(mean_distance,  na.rm = TRUE),
+    score    = mean(row_score,      na.rm = TRUE)
+  ) %>%
+  arrange(desc(score))
+
+head(overall, 10)
+```
+
+# 5. AUC distribution by population
+
+```{r}
+ggplot(df, aes(population, auc_normalized, fill = population)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +
+  labs(title = "AUC distribution by population",
+       x = "Population", y = "AUC (normalized)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 5.1 Mean Match Scores distribution by population
+
+```{r}
+ggplot(df, aes(population, mean_match_score, fill = population)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +
+  labs(title = "Mean Haplogroup Matching distribution by population (higher=better)",
+       x = "Population", y = "Mean Match Score") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 5.2 Mean Haplogroup Distance distribution by population
+
+```{r}
+ggplot(df, aes(population, mean_distance, fill = population)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  scale_y_continuous(labels = number_format(accuracy = 0.001)) +
+  labs(title = "Mean Haplogroup Distance by population (lower=better)",
+       x = "Population", y = "Mean Match Score") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Interpretation: - Compare medians and spread of AUC across populations
+to identify populations where haplogroup assignment is inherently harder
+or easier.
+
+# 6. AUC vs distance within each population (Pareto view)
+
+We visualize the trade-off between AUC (higher is better) and mean
+distance (lower is better). We label top performers by a simple
+Pareto-like score: $$
+\text{pareto} = \text{AUC} - w \times \text{distance}
+$$ with adjustable weight w = params\$pareto_w.
+
+```{r}
+pareto_w <- params$pareto_w
+
+top_per_pop <- df %>%
+  group_by(population) %>%
+  mutate(pareto = auc_normalized - pareto_w * mean_distance) %>%
+  slice_max(order_by = pareto, n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(df, aes(mean_distance, auc_normalized, color = tier)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, color = "gray40", linetype = 2) +
+  geom_text_repel(
+    data = top_per_pop,
+    aes(label = array_type),
+    size = 3, max.overlaps = 20, seed = params$seed
+  ) +
+  facet_wrap(~ population) +
+  labs(title = "AUC vs Mean Distance per population",
+       x = "Mean distance (lower is better)",
+       y = "AUC (higher is better)",
+       color = "Tier") +
+  theme_minimal()
+```
+
+# 7. Top microarrays overall (composite score)
+
+```{r}
+top_overall <- overall %>%
+  slice_max(order_by = score, n = params$top_n_overall) %>%
+  mutate(array_type = fct_reorder(as.character(array_type), score))
+
+ggplot(top_overall, aes(array_type, score)) +
+  geom_col(fill = "#2b8cbe") +
+  coord_flip() +
+  labs(title = paste0("Top microarrays overall (composite z-score: AUC_z - ",
+                      w, " * Distance_z)"),
+       x = "Array type", y = "Overall score") +
+  theme_minimal()
+```
+
+# 8. Heatmap: performance by population per array (AUC)
+
+We cluster arrays based on their AUC profiles across populations and
+visualize a heatmap.
+
+```{r}
+# Wide AUC matrix
+auc_wide <- df %>%
+  select(array_type, population, auc_normalized) %>%
+  mutate(array_type = as.character(array_type)) %>%
+  pivot_wider(names_from = population, values_from = auc_normalized)
+
+auc_mat <- auc_wide %>%
+  column_to_rownames("array_type") %>%
+  as.matrix()
+
+# Impute NAs per population with column mean
+for (j in seq_len(ncol(auc_mat))) {
+  nas <- is.na(auc_mat[, j])
+  if (any(nas)) auc_mat[nas, j] <- mean(auc_mat[, j], na.rm = TRUE)
+}
+
+# Cluster arrays by their AUC profiles (scaled columns)
+auc_mat_scaled <- scale(auc_mat, center = TRUE, scale = TRUE)
+arr_order <- hclust(dist(auc_mat_scaled))$order
+array_levels <- rownames(auc_mat_scaled)[arr_order]
+
+heat_df <- auc_wide %>%
+  pivot_longer(-array_type, names_to = "population", values_to = "auc") %>%
+  mutate(
+    array_type = factor(array_type, levels = array_levels),
+    population = factor(population, levels = sort(unique(population)))
+  )
+
+ggplot(heat_df, aes(population, array_type, fill = auc)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "C", name = "AUC") +
+  labs(title = "AUC heatmap by population (arrays clustered by AUC profile)",
+       x = "Population", y = "Array type") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6))
+```
+
+# 9. Similar behavior via PCA (AUC + distance features)
+
+We build features combining AUC and distance across populations and run
+PCA to visualize arrays with similar cross-population behavior.
+
+```{r}
+feat_auc <- df %>%
+  select(array_type, population, auc_normalized) %>%
+  pivot_wider(names_from = population, values_from = auc_normalized, names_prefix = "auc_")
+
+feat_dist <- df %>%
+  select(array_type, population, mean_distance) %>%
+  pivot_wider(names_from = population, values_from = mean_distance, names_prefix = "dist_")
+
+feat <- feat_auc %>%
+  left_join(feat_dist, by = "array_type") %>%
+  column_to_rownames("array_type") %>%
+  as.data.frame()
+
+# Impute missing values with column means
+for (j in seq_len(ncol(feat))) {
+  nas <- is.na(feat[, j])
+  if (any(nas)) feat[nas, j] <- mean(feat[, j], na.rm = TRUE)
+}
+
+# PCA on scaled features
+pca <- prcomp(scale(feat), center = TRUE, scale. = TRUE)
+
+scores <- as_tibble(pca$x, rownames = "array_type") %>%
+  left_join(overall, by = "array_type")
+
+ggplot(scores, aes(PC1, PC2, color = score)) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis_c(option = "C") +
+  ggrepel::geom_text_repel(
+    aes(label = ifelse(rank(-score) <= params$top_n_overall, array_type, "")),
+    size = 3, max.overlaps = 20, seed = params$seed
+  ) +
+  labs(title = "PCA of microarrays across populations (AUC + distance features)",
+       x = paste0("PC1 (", scales::percent(summary(pca)$importance[2, 1]), ")"),
+       y = paste0("PC2 (", scales::percent(summary(pca)$importance[2, 2]), ")"),
+       color = "Overall score") +
+  theme_minimal()
+```
+
+# 10. Optional: similarity map via correlation of AUC profiles
+
+We compute pairwise similarity using Pearson correlation across
+population AUC profiles, then project into 2D with classical MDS.
+
+The distance is: $$
+d_{ij} = 1 - r_{ij}
+$$
+
+```{r}
+auc_prof <- df %>%
+  select(array_type, population, auc_normalized) %>%
+  pivot_wider(names_from = population, values_from = auc_normalized) %>%
+  column_to_rownames("array_type") %>%
+  as.matrix()
+
+# Impute NAs by column means
+for (j in seq_len(ncol(auc_prof))) {
+  nas <- is.na(auc_prof[, j])
+  if (any(nas)) auc_prof[nas, j] <- mean(auc_prof[, j], na.rm = TRUE)
+}
+
+# Correlation-based distance
+cor_mat <- cor(t(auc_prof), use = "pairwise.complete.obs")
+dist_cor <- as.dist(1 - cor_mat)
+
+# MDS embedding
+mds <- cmdscale(dist_cor, k = 2)
+mds_df <- as_tibble(mds, .name_repair = "minimal") %>%
+  set_names(c("x", "y")) %>%
+  mutate(array_type = rownames(mds)) %>%
+  left_join(overall, by = "array_type")
+
+ggplot(mds_df, aes(x, y, color = score)) +
+  geom_point(size = 2, alpha = 0.9) +
+  scale_color_viridis_c(option = "C") +
+  ggrepel::geom_text_repel(
+    aes(label = ifelse(rank(-score) <= params$top_n_overall, array_type, "")),
+    size = 3, max.overlaps = 20, seed = params$seed
+  ) +
+  labs(title = "Similarity map (MDS on 1 - correlation of AUC profiles)",
+       x = "MDS1", y = "MDS2", color = "Overall score") +
+  theme_minimal()
+```
+
+# 11. Interpretation tips
+
+-   AUC distribution plot: Identify populations with lower central
+    tendency or broader spread, which may indicate greater difficulty
+    assigning haplogroups.
+-   Pareto plots: Within each population, top-left points (high AUC, low
+    distance) are best. The LOESS curve shows the average trade-off.
+-   Top overall bar chart: Highlights arrays that are robust across
+    populations given the composite score. Adjust the distance weight if
+    needed.
+-   Heatmap: Arrays with consistently high AUC across all populations
+    are desirable; clustering groups arrays with similar performance
+    profiles.
+-   PCA/MDS: Nearby points behave similarly across populations. Use
+    these to find substitutes or arrays that cluster with known strong
+    performers.
+
+# 12. Reproducibility and diagnostics
+
+-   Inspect input schemas:
+
+``` r
+unique(schemas)
+```
+
+-   If issues persist with the population column:
+
+``` r
+str(df$population)
+names(df)
+```
+
+-   Validate complete cases per array-population:
+
+``` r
+df %>% count(array_type, population) %>% count(array_type) %>% arrange(n)
+```
+
+-   Save intermediate outputs:
+
+``` r
+readr::write_csv(overall, "overall_scores.csv")
+```
+
+-   Session info:
+
+``` r
+sessionInfo()
+```
+
+Appendix: Parameter notes - pareto_w controls the trade-off in labeling
+top performers in the faceted scatter. Larger values penalize distance
+more strongly. - score_w controls the contribution of distance in the
+overall composite: score_row = auc_z − w × dist_z. - You may set both to
+0 to focus purely on AUC, or increase them to emphasize distance.
+
+Formulas used - Per-population z-score for metric x: $$
+z = \frac{x - \mu}{\sigma}
+$$ - Correlation-based distance between arrays i and j: $$
+d_{ij} = 1 - r_{ij}
+$$
+
+If you share a few representative rows from each file (including
+headers), we can further specialize the data harmonization to avoid
+df-cols and ensure consistent factor levels across populations.
