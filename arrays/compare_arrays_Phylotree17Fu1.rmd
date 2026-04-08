@@ -492,4 +492,48 @@ ggplot(auc_results, aes(x = reorder(ArrayType, AUC_Normalized), y = AUC_Normaliz
   theme_minimal()
 
 ```
+
+# Correlation checks
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=9, fig.height=11, out.width="100%"}
+
+all_arrays <- read.csv("~/git/mito-array/arrays/array_illumina/all_arrays.txt")
+
+
+merged_arrays<-merge(all_arrays, auc_results, by="ArrayType")
+
+#check AUC_normalized
+p1<-ggplot(merged_arrays, aes(x=SNPs, y=AUC_Normalized, color=Tier, labels=ArrayType)) + geom_point() +  theme_minimal() + ggtitle(label="Correlation between amount of SNPs and AUC values", subtitle = "colored by Tier - higher AUC value = better")
+ggplotly(p1)
+cor(merged_arrays$AUC_Normalized, merged_arrays$SNPs)
+
+#check Mean_Distance
+p2<-ggplot(merged_arrays, aes(x=SNPs, y=Mean_Distance, color=Tier, labels=ArrayType)) + geom_point() +  theme_minimal() + ggtitle(label="Correlation between amount of SNPs and Mean Phylogenetic Distance", subtitle = "colored by Tier - lower distance values = better")
+ggplotly(p2) 
+cor(merged_arrays$Mean_Distance, merged_arrays$SNPs)
+
+#check Mean_Match_score
+p3<-ggplot(merged_arrays, aes(x=SNPs, y=Mean_Match_Score, color=Tier, labels=ArrayType)) + geom_point() +  theme_minimal() + ggtitle(label="Correlation between amount of SNPs and Mean Match Score on haplogroup nomenclature groupings", subtitle = "colored by Tier - higher scores = better")
+ggplotly(p3) 
+cor(merged_arrays$Mean_Match_Score, merged_arrays$SNPs)
+
+#comparison Mean_Match_Score to AUC_normalized
+p4<-ggplot(merged_arrays, aes(x=AUC_Normalized, y=Mean_Match_Score, color=Tier, labels=ArrayType)) + geom_point() +  theme_minimal()
+ggplotly(p4)
+cor(merged_arrays$Mean_Match_Score, merged_arrays$AUC_Normalized)
+
+
+all_merged_arrays<-merge(all_arrays, auc_results, by="ArrayType", all.x = TRUE)
+ggplot(all_merged_arrays, aes(x=Mean_Distance, y=SNPs, color=as.factor(ClusterID))) + geom_point()
+
+
+merged_filled <- merged_arrays %>%
+  group_by(ClusterID, SNPs) %>% 
+  fill(AUC_Normalized, Mean_Distance, n, Tier, Population, Mean_Match_Score, 
+       .direction = "downup") %>%
+  ungroup()
+
+write.table(merged_filled, "full_performance_arrays.txt", row.names = FALSE)
+
+
 ```
