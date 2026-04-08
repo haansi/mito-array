@@ -263,6 +263,25 @@ unique_binary_df <- binary_df %>%
 rownames(unique_binary_df) <- unique_binary_df$ArrayType
 unique_matrix_final <- as.matrix(unique_binary_df %>% select(-ArrayType))
 
+# Create a mapping of all clusters
+
+all_clusters <- cutree(hc, k = k_choice)
+
+all_cluster_df <- data.frame(
+  ArrayType = names(all_clusters),
+  ClusterID = as.factor(all_clusters)
+)
+
+
+ all_cluster_df <- all_cluster_df %>% mutate(
+    SNPs = as.numeric(str_extract(ArrayType, "(?<=\\()\\d+(?=\\))"))) %>%
+       mutate(ArrayType = clean_text <- sub("\\s*\\(.*", "", ArrayType)) 
+  
+ 
+
+  
+
+
 cat("Original microarrays:", nrow(binary_matrix), "\n")
 cat("Unique fingerprints:", nrow(unique_matrix_final), "\n")
 
@@ -366,6 +385,7 @@ print(select(final_representatives, ArrayType, ClusterID, snp_num, extreme_label
 
 write.table(final_representatives, file="final_representative_arrays.txt", sep=",", row.names = FALSE)
 write.table(unique_cluster_df, file="all_unique_arrays.txt", sep=",", row.names = FALSE)
+write.table(all_cluster_df, file="all_arrays.txt", sep=",", row.names = FALSE)
 ```
 
 ## Check RefAlt files
@@ -407,7 +427,7 @@ snp_refAlt_neg_df<-merge(refAlt_df, SNPids_df[SNPids_df$Strand=="-",], by.x="SNP
 
 ```
 
-# Compare major arrays for haplogroup metrics `r paste("#", pop, sep=" ")`
+# Compare major arrays for haplogroup metrics 
 
 ```{r, echo=FALSE, warnings=FALSE, message=FALSE, fig.width=9, fig.height=11, out.width="100%"}
 
@@ -427,13 +447,13 @@ phylotreeVersion <- "17_FU1"
 #readLines("../../scripts/haplogroup_processing.R", n = 100)
 
 ##test-scenarios######################################################
-#hsd_path_abs <- normalizePath("data/test10AFR.hsd", mustWork = TRUE)
-hsd_path_abs <- normalizePath("data/test193AFR.hsd", mustWork = TRUE)
+hsd_path_abs <- normalizePath("data/test10AFR.hsd", mustWork = TRUE)
+#hsd_path_abs <- normalizePath("data/test193AFR.hsd", mustWork = TRUE)
 hsd_data <- read.delim(hsd_path_abs)
 hsd_data[[3]] <- ""
 hsd_data <- hsd_data[, colSums(is.na(hsd_data)) == 0]
 
-pop="AFR_193"
+pop="AFR_10"
 
 
 #csv_path_abs <- normalizePath("../../reference/output/ref_AFR.csv", mustWork = TRUE)
